@@ -43,13 +43,22 @@ class _DictEmbedder:
 
 
 class _SpyVectorStore:
-    """Captures the doc_ids allow-list passed by the retriever."""
+    """Captures the doc_ids allow-list passed by the retriever.
+
+    Phase 8.2: the retriever now does a SECOND vector query with no
+    ``doc_ids`` to surface global episodic memories (memories filed under
+    a sibling leaf the beam did not pick). Capture only the FIRST call —
+    that's the leaf-doc allow-list this fixture was designed to inspect.
+    """
 
     def __init__(self) -> None:
         self.last_doc_ids: list[str] | None = None
+        self._captured = False
 
     def query(self, *, user_id, query_embedding, top_k, source_types=None, doc_ids=None, where=None):
-        self.last_doc_ids = list(doc_ids) if doc_ids else []
+        if not self._captured:
+            self.last_doc_ids = list(doc_ids) if doc_ids else []
+            self._captured = True
         return []
 
 

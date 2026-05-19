@@ -29,6 +29,45 @@ function renderMD(src, { withHighlight = false } = {}) {
   }
 }
 
+// ChatGPT-style incremental markdown render during SSE streaming.
+// Debounced to ~33ms so we never re-parse more than ~30 times/sec even
+// when tokens arrive in a fast burst. Renders go through the same
+// DOMPurify-sanitized path as the final render — no new XSS sink.
+const STREAM_MD_DEBOUNCE_MS = 33;
+
+function scheduleStreamingMdRender(els) {
+  if (!els || !els.bubble) return;
+  if (els.bubble._mdRenderPending) return;
+  els.bubble._mdRenderPending = true;
+  const now = performance.now();
+  const elapsed = now - (els.bubble._mdLastRender || 0);
+  const delay = Math.max(0, STREAM_MD_DEBOUNCE_MS - elapsed);
+  els.bubble._mdRenderTimer = setTimeout(() => {
+    els.bubble._mdRenderPending = false;
+    els.bubble._mdRenderTimer = null;
+    els.bubble._mdLastRender = performance.now();
+    renderStreamingMd(els);
+  }, delay);
+}
+
+function renderStreamingMd(els) {
+  if (!els || !els.bubble) return;
+  const raw = els.bubble._rawText || '';
+  try {
+    // No hljs during stream — keeps per-render cost low and matches the
+    // existing pattern where withHighlight is only true on the final render.
+    // Append an inline blinking caret span so the user sees streaming
+    // progress even after innerHTML is replaced each tick. The trailing
+    // <span class="md-cursor"></span> is stripped by the final-event
+    // handler when it re-renders without it.
+    els.bubble.innerHTML = renderMD(raw, { withHighlight: false }) +
+      '<span class="md-cursor" aria-hidden="true"></span>';
+  } catch (e) {
+    // Fallback: dump the raw text so the user never sees a blank bubble.
+    els.bubble.textContent = raw;
+  }
+}
+
 function escapeHTML(s) {
   return String(s ?? '')
     .replaceAll('&', '&amp;')
@@ -57,13 +96,35 @@ function attachCopyButtons(root) {
   }
 }
 
+/** Detect text direction from a string. Returns 'rtl' if the sample is
+ *  dominantly Persian/Arabic/Hebrew, 'ltr' if dominantly Latin, 'auto'
+ *  for mixed/unknown — caller hands 'auto' to the browser so BiDi
+ *  resolves per-paragraph. */
+function detectDir(text) {
+  if (!text) return 'auto';
+  const sample = text.slice(0, 500);
+  // Hebrew + Arabic + Persian + Arabic Supplement + N'Ko + Samaritan +
+  // Mandaic + Arabic Extended-A + Arabic Presentation Forms A/B
+  const rtlRe = /[֐-׿؀-ۿ܀-ݏݐ-ݿހ-޿߀-߿ࠀ-࠿ࡀ-࡟ࢠ-ࣿיִ-﷿ﹰ-﻿]/;
+  const ltrRe = /[A-Za-z]/;
+  const rtl = rtlRe.test(sample);
+  const ltr = ltrRe.test(sample);
+  if (rtl && !ltr) return 'rtl';
+  if (ltr && !rtl) return 'ltr';
+  return 'auto';  // mixed or unknown — let the browser decide
+}
+
+/** Mark a content-bearing element so the browser BiDi algorithm picks
+ *  direction per first strong character, and apply `lang="fa"` only when
+ *  the text leans RTL so the Persian font stack kicks in. Paragraph-level
+ *  resolution comes from `unicode-bidi: plaintext` in styles.css. */
 function maybeRTL(el, text) {
-  // crude heuristic: any Persian/Arabic-block character → flip to RTL
-  if (/[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/.test(text || '')) {
-    el.setAttribute('dir', 'rtl');
+  // `dir="auto"` handles mixed English+Farsi paragraphs (e.g.
+  // "Mahmoud monfared درباره چی میدونی") far better than a hard rtl/ltr flip.
+  el.setAttribute('dir', 'auto');
+  if (detectDir(text) === 'rtl') {
     el.setAttribute('lang', 'fa');
   } else {
-    el.removeAttribute('dir');
     el.removeAttribute('lang');
   }
 }
@@ -186,6 +247,11 @@ const state = {
   config: null,
   streaming: false,
   controller: null,  // AbortController for in-flight stream
+  // Phase 8 inline review-card state
+  currentTurnId: null,       // captured from the orchestrator's start event
+  pendingReview: null,       // the ReviewRequired payload while the card is open
+  reviewCardOpen: false,
+  _streamEls: null,          // active turn's streaming DOM handles (used by the inline review card)
 };
 
 // ---------- theme ----------
@@ -231,6 +297,9 @@ initTheme();
 // ---------- init ----------
 (async function init() {
   // wire UI
+  // Bilingual: textarea picks RTL or LTR per first-strong character so a
+  // Farsi sentence shows the caret on the right, English on the left.
+  inputEl.setAttribute('dir', 'auto');
   inputEl.addEventListener('input', autoResize);
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
@@ -543,6 +612,9 @@ initTheme();
       if (e.key === 'Enter') { e.preventDefault(); cfgNougatModel.blur(); }
     });
   }
+
+  // Phase 8: wire up the inline review-card global keyboard shortcuts.
+  initReviewCard();
 
   await loadConfig();
   await loadLLMModels();
@@ -1313,7 +1385,14 @@ async function submit() {
   autoResize();
   scrollToEnd(true);
 
+  // Phase 8: a new turn starts here — drop any stale review state.
+  state.currentTurnId = null;
+  state.pendingReview = null;
+
   const streamEls = appendStreaming();
+  // Phase 8: the inline review card needs a handle to the active assistant
+  // wrap so it can insert itself ABOVE the streaming bubble.
+  state._streamEls = streamEls;
   state.streaming = true;
   setSendStop(true);
 
@@ -1361,6 +1440,7 @@ async function submit() {
     state.streaming = false;
     setSendStop(false);
     state.controller = null;
+    state._streamEls = null;
     // refresh sidebar to capture the new session
     loadSessions();
   }
@@ -1388,19 +1468,17 @@ function handleSSE(chunk, els) {
     case 'token': {
       const piece = typeof data === 'string' ? data : (data.token || data.content || '');
       if (!els.bubble._rawText) {
-        // first token — flip phase to "write" and switch the bubble into
-        // fast text-append mode (no markdown parse) until `final` lands.
+        // first token — flip phase to "write" and prep the bubble for
+        // incremental markdown rendering (ChatGPT-style). The trailing
+        // <span class="md-cursor"> is appended on every streaming render.
         setPhase(els, 'write', 'writing…');
-        els.bubble.classList.add('streaming-plain', 'cursor');
+        els.bubble.classList.remove('streaming-plain', 'cursor');
         els.bubble.innerHTML = '';
-        els.bubble._textNode = document.createTextNode('');
-        els.bubble.appendChild(els.bubble._textNode);
+        els.bubble._rawText = '';
         maybeRTL(els.bubble, piece);
       }
       els.bubble._rawText += piece;
-      // O(1) per token: just append to the existing text node — no parse,
-      // no sanitize, no innerHTML, no reflow churn.
-      els.bubble._textNode.appendData(piece);
+      scheduleStreamingMdRender(els);
       // Auto-scroll at most once per frame to keep the latest text in view.
       if (!els.bubble._scrollPending) {
         els.bubble._scrollPending = true;
@@ -1423,7 +1501,13 @@ function handleSSE(chunk, els) {
     case 'final': {
       const final = data;
       els.bubble._rawText = final.answer || els.bubble._rawText;
-      // Swap the plain-text streaming view for the full markdown render
+      // Cancel any pending streaming render so it can't clobber the final one.
+      if (els.bubble._mdRenderTimer) {
+        clearTimeout(els.bubble._mdRenderTimer);
+        els.bubble._mdRenderTimer = null;
+      }
+      els.bubble._mdRenderPending = false;
+      // Swap the incremental streaming markdown for the full final render
       // (with syntax highlighting + copy buttons) in a single repaint.
       els.bubble.classList.remove('streaming-plain', 'cursor');
       els.bubble._textNode = null;
@@ -1445,14 +1529,47 @@ function handleSSE(chunk, els) {
     }
 
     case 'error':
+      if (els.bubble._mdRenderTimer) {
+        clearTimeout(els.bubble._mdRenderTimer);
+        els.bubble._mdRenderTimer = null;
+      }
+      els.bubble._mdRenderPending = false;
       els.bubble.classList.remove('cursor');
       els.bubble.innerHTML = `<div style="color:var(--bad)">Error: ${escapeHTML(data?.message || 'unknown error')}</div>`;
       setPhase(els, 'done', 'error');
       break;
 
-    case 'done':
+    case 'done': {
+      if (els.bubble._mdRenderTimer) {
+        clearTimeout(els.bubble._mdRenderTimer);
+        els.bubble._mdRenderTimer = null;
+      }
+      els.bubble._mdRenderPending = false;
       els.bubble.classList.remove('cursor');
+      // Strip any lingering streaming caret if `final` didn't fire.
+      const lingeringCursor = els.bubble.querySelector('.md-cursor');
+      if (lingeringCursor) lingeringCursor.remove();
       break;
+    }
+
+    // ---- Phase 8: human-in-the-loop review ----
+    case 'review_required':
+      handleReviewRequired(typeof data === 'object' ? data : {});
+      break;
+    case 'review_resolved': {
+      // The modal has already closed (we close it on submit). This is a
+      // confirmation echo from the orchestrator; surface a toast on timeout.
+      const p = (typeof data === 'object' && data) || {};
+      if (p.timed_out) flashToast('Review timed out — continuing with defaults');
+      break;
+    }
+    case 'followups': {
+      const p = (typeof data === 'object' && data) || {};
+      if (p && Array.isArray(p.chips) && p.chips.length) {
+        renderFollowups(els, p.chips);
+      }
+      break;
+    }
   }
 }
 
@@ -1460,8 +1577,16 @@ function handleProgress(els, ev, payload) {
   const trace = els.trace;
   switch (ev) {
     case 'start':
+      // Phase 8: capture turn_id so the review modal can POST /resume.
+      if (payload && payload.turn_id) state.currentTurnId = payload.turn_id;
       pushTraceStep(trace, 'start', '');
       setPhase(els, 'retrieve', 'thinking…');
+      break;
+    case 'review_warning':
+      // Non-fatal warnings emitted by the interaction module (e.g. redescend
+      // not supported by the active retriever). Surface as a quick toast.
+      flashToast((payload && payload.message) || 'Review warning');
+      pushTraceStep(trace, 'review-warn', (payload && payload.message) || '');
       break;
     case 'intent_check':
       trace._intent = payload;
@@ -1603,6 +1728,517 @@ function setPhase(els, name, text) {
   els.phase.classList.add('phase-' + name);
   const t = els.phase.querySelector('.ptext');
   if (t) t.textContent = text;
+}
+
+// ---------- Phase 8: inline review card ----------
+// The orchestrator may pause between retrieval and generation when one of the
+// configured signals trips (low score floor, ambiguous top-2, cross-branch
+// hits, intent unclear, …). It emits `review_required` with a full payload and
+// blocks on the resume queue until the frontend POSTs back to
+// /api/chat/turns/{turn_id}/resume.
+//
+// We render the review UI as an INLINE CARD inside the active assistant
+// message wrap (above the streaming bubble), not as a centred modal. Once the
+// user resolves it, the card collapses to a one-line "Reviewed: …" summary
+// that stays as a thin separator above the answer.
+
+const REVIEW_REASON_INFO = {
+  score_floor:          { label: 'Low confidence',   tone: 'warn', hint: 'No strong matches in your docs' },
+  ambiguity_delta:      { label: 'Ambiguous',        tone: 'warn', hint: 'Top candidates are tied' },
+  branch_threshold:     { label: 'Cross-domain',     tone: 'info', hint: 'Hits span multiple branches' },
+  intent_unclear:       { label: 'Intent unclear',   tone: 'warn', hint: "I'm not sure what you're asking" },
+  router_ambiguous:     { label: 'Router uncertain', tone: 'info' },
+  factual_general_swap: { label: 'Maybe off-corpus', tone: 'warn', hint: 'I might do better with general knowledge' },
+  always_mode:          { label: 'Always-pause',     tone: 'info', hint: 'Step-through mode is on' },
+};
+
+function handleReviewRequired(payload) {
+  state.pendingReview = payload || {};
+  state.reviewCardOpen = true;
+  if (payload && payload.turn_id && !state.currentTurnId) {
+    state.currentTurnId = payload.turn_id;
+  }
+
+  // Find the active assistant message wrap — the streaming bubble belongs to it.
+  // submit() exposes a `_streamEls` handle for the current chat turn.
+  const wrap = state._streamEls && state._streamEls.wrap;
+  if (!wrap) {
+    console.warn('no _streamEls.wrap; cannot render inline review card');
+    return;
+  }
+
+  const card = renderReviewCard(payload || {});
+  // Place the card ABOVE the streaming bubble so when the answer streams,
+  // the eventual collapsed summary stays above the answer text.
+  const bubble = wrap.querySelector('.bubble');
+  if (bubble && bubble.parentNode === wrap) {
+    wrap.insertBefore(card, bubble);
+  } else {
+    wrap.appendChild(card);
+  }
+  scrollToEnd(false);
+
+  // Focus the Continue button so Enter is the default decision
+  setTimeout(() => {
+    const btn = card.querySelector('.review-card-continue-btn');
+    if (btn) btn.focus();
+  }, 30);
+}
+
+function renderReviewCard(payload) {
+  const card = document.createElement('div');
+  card.className = 'review-card';
+  card.dataset.turnId = payload.turn_id || '';
+
+  // ----- Head row: title + reason chips on one line -----
+  const head = document.createElement('div');
+  head.className = 'review-card-head';
+  const title = document.createElement('span');
+  title.className = 'review-card-title';
+  title.textContent = 'Quick check before I answer';
+  head.appendChild(title);
+  const reasonsBox = document.createElement('span');
+  reasonsBox.className = 'review-card-reasons';
+  (payload.reasons || []).forEach(r => {
+    const info = REVIEW_REASON_INFO[r] || { label: r };
+    const chip = document.createElement('span');
+    chip.className = 'review-reason-chip';
+    if (info.tone) chip.dataset.tone = info.tone;
+    chip.textContent = info.label;
+    if (info.hint) chip.title = info.hint;
+    reasonsBox.appendChild(chip);
+  });
+  head.appendChild(reasonsBox);
+  card.appendChild(head);
+
+  // ----- Body -----
+  const body = document.createElement('div');
+  body.className = 'review-card-body';
+
+  // Clue (editable single-line input)
+  const clueRow = document.createElement('div');
+  clueRow.className = 'review-card-clue-row';
+  const clueInput = document.createElement('input');
+  clueInput.type = 'text';
+  clueInput.className = 'review-card-clue';
+  clueInput.value = payload.clue || payload.original_question || '';
+  clueInput.placeholder = payload.original_question || 'Edit if I misread your question.';
+  clueInput.title = 'Edit if I misread your question. Press Enter to use this phrasing.';
+  // Bilingual: let the browser BiDi-resolve direction from the clue text.
+  clueInput.setAttribute('dir', 'auto');
+  clueRow.appendChild(clueInput);
+  body.appendChild(clueRow);
+
+  // Original-question fallback line (muted, only if it differs from the clue)
+  const orig = (payload.original_question || '').trim();
+  const clue = (payload.clue || '').trim();
+  if (orig && clue && orig !== clue) {
+    const origLine = document.createElement('div');
+    origLine.className = 'review-card-hint';
+    origLine.style.opacity = '0.85';
+    origLine.textContent = `Your question: "${orig}"`;
+    body.appendChild(origLine);
+  }
+
+  // Rephrasings (inline chips)
+  const rephrasings = (payload.rephrasings || []).filter(Boolean);
+  if (rephrasings.length) {
+    const r = document.createElement('div');
+    r.className = 'review-card-rephrasings';
+    rephrasings.forEach(p => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'review-rephrasing-chip';
+      btn.textContent = p;
+      btn.addEventListener('click', () => { clueInput.value = p; clueInput.focus(); });
+      r.appendChild(btn);
+    });
+    body.appendChild(r);
+  }
+
+  // Taxonomy breadcrumbs (inline, click to redirect)
+  const descend = payload.taxonomy_descend;
+  if (descend && Array.isArray(descend.leaves) && descend.leaves.length) {
+    const bc = document.createElement('div');
+    bc.className = 'review-card-breadcrumb';
+    const label = document.createElement('span');
+    label.className = 'review-card-hint';
+    label.style.opacity = '0.85';
+    label.textContent = 'I walked:';
+    bc.appendChild(label);
+    descend.leaves.forEach((leaf, i) => {
+      if (i > 0) {
+        const sep = document.createElement('span');
+        sep.className = 'review-breadcrumb-sep';
+        sep.textContent = '·';
+        bc.appendChild(sep);
+      }
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'review-breadcrumb-node';
+      const dc = (leaf.doc_count != null) ? ` (${leaf.doc_count})` : '';
+      btn.textContent = `${leaf.label || leaf.node_id || '?'}${dc}`;
+      btn.dataset.nodeId = leaf.node_id || '';
+      btn.title = 'Click to redirect retrieval here';
+      btn.addEventListener('click', () =>
+        submitReviewDecision(card, { action: 'redescend', redirect_taxonomy_node_id: leaf.node_id }));
+      bc.appendChild(btn);
+    });
+    body.appendChild(bc);
+  }
+
+  // Sources list (compact rows, max-height scroll)
+  const sources = payload.sources || [];
+  if (sources.length) {
+    const srcBox = document.createElement('div');
+    srcBox.className = 'review-card-sources';
+    sources.forEach((s, i) => {
+      const row = document.createElement('div');
+      row.className = 'review-card-source';
+      row.dataset.chunkId = s.chunk_id || '';
+      row.dataset.docId = s.doc_id || '';
+      row.dataset.index = String(i);
+
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'review-card-source-cb';
+      cb.checked = true;
+
+      const idx = document.createElement('span');
+      idx.className = 'review-card-source-idx';
+      idx.textContent = `[${i + 1}]`;
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'review-card-source-title';
+      titleSpan.textContent = `${s.title || 'Untitled'}${s.section ? ' · ' + s.section : ''}`;
+      titleSpan.setAttribute('dir', 'auto');
+
+      const score = document.createElement('span');
+      score.className = 'review-card-source-score';
+      const rs = (typeof s.rerank_score === 'number') ? s.rerank_score.toFixed(2)
+              : (typeof s.score === 'number' ? s.score.toFixed(3) : '—');
+      score.textContent = rs;
+      score.style.fontSize = '11px';
+      score.style.color = 'var(--muted)';
+      score.style.fontVariantNumeric = 'tabular-nums';
+
+      const snip = document.createElement('div');
+      snip.className = 'review-card-source-snippet';
+      const snippetText = (s.snippet || (s.text || '').slice(0, 240)) || '';
+      snip.textContent = snippetText.length > 120 ? snippetText.slice(0, 120) + '…' : snippetText;
+      snip.dataset.full = snippetText;
+      snip.setAttribute('dir', 'auto');
+      snip.title = 'Click to expand';
+      snip.addEventListener('click', () => {
+        const expanded = snip.classList.toggle('expanded');
+        snip.textContent = expanded ? (snip.dataset.full || '') :
+          (snip.dataset.full.length > 120 ? snip.dataset.full.slice(0, 120) + '…' : snip.dataset.full);
+      });
+
+      const actions = document.createElement('span');
+      actions.className = 'review-card-source-actions';
+      const whyBtn = document.createElement('button');
+      whyBtn.type = 'button'; whyBtn.textContent = 'why?';
+      whyBtn.title = 'Explain why this source was selected';
+      whyBtn.addEventListener('click', () => fetchWhySource(row, s, payload));
+      const moreBtn = document.createElement('button');
+      moreBtn.type = 'button'; moreBtn.textContent = '↗ more';
+      moreBtn.title = 'Re-retrieve scoped to this document';
+      moreBtn.addEventListener('click', () =>
+        submitReviewDecision(card, { action: 'expand_doc', expand_from_doc_id: s.doc_id }));
+      actions.appendChild(whyBtn);
+      actions.appendChild(moreBtn);
+
+      row.appendChild(cb);
+      row.appendChild(idx);
+      row.appendChild(titleSpan);
+      row.appendChild(score);
+      row.appendChild(snip);
+
+      // Action buttons go on their own sub-row (spanning full grid width, right-aligned).
+      const actRow = document.createElement('div');
+      actRow.style.gridColumn = '1 / -1';
+      actRow.style.display = 'flex';
+      actRow.style.justifyContent = 'flex-end';
+      actRow.appendChild(actions);
+      row.appendChild(actRow);
+
+      srcBox.appendChild(row);
+    });
+    body.appendChild(srcBox);
+  }
+
+  card.appendChild(body);
+
+  // ----- Footer: toggles + actions -----
+  const foot = document.createElement('div');
+  foot.className = 'review-card-foot';
+  const toggles = document.createElement('div');
+  toggles.className = 'review-card-foot-toggles';
+
+  const epiLabel = document.createElement('label');
+  epiLabel.className = 'review-toggle';
+  const epiCb = document.createElement('input');
+  epiCb.type = 'checkbox'; epiCb.className = 'review-card-episodic';
+  const epiText = document.createElement('span'); epiText.textContent = 'Include memories';
+  epiLabel.appendChild(epiCb); epiLabel.appendChild(epiText);
+  toggles.appendChild(epiLabel);
+
+  const memLabel = document.createElement('label');
+  memLabel.className = 'review-toggle';
+  const memCb = document.createElement('input');
+  memCb.type = 'checkbox'; memCb.className = 'review-card-remember';
+  const memText = document.createElement('span'); memText.textContent = 'Remember choice';
+  memLabel.appendChild(memCb); memLabel.appendChild(memText);
+  toggles.appendChild(memLabel);
+  foot.appendChild(toggles);
+
+  const actions = document.createElement('div');
+  actions.className = 'review-card-foot-actions';
+  const mkBtn = (cls, label, action) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = cls; b.textContent = label;
+    b.addEventListener('click', () => submitReviewDecision(card, { action }));
+    return b;
+  };
+  actions.appendChild(mkBtn('ghost review-card-general-btn', 'General knowledge', 'general'));
+  actions.appendChild(mkBtn('ghost review-card-clarify-btn', 'Clarify', 'clarify'));
+  actions.appendChild(mkBtn('ghost review-card-abort-btn', 'Cancel', 'abort'));
+  actions.appendChild(mkBtn('primary review-card-continue-btn', 'Continue ↵', 'continue'));
+  foot.appendChild(actions);
+  card.appendChild(foot);
+
+  // Hint line
+  const hint = document.createElement('div');
+  hint.className = 'review-card-hint';
+  hint.textContent = 'Enter accept · Esc cancel · 1-9 toggle source · E edit clue · G general';
+  card.appendChild(hint);
+
+  // Clue input: Enter submits, Esc cancels.
+  clueInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitReviewDecision(card, { action: 'continue' });
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      submitReviewDecision(card, { action: 'abort' });
+    }
+  });
+
+  return card;
+}
+
+async function submitReviewDecision(card, partial) {
+  if (!card || card.dataset.resolved === '1') return;
+  card.dataset.resolved = '1';
+  const turnId = card.dataset.turnId
+    || state.currentTurnId
+    || (state.pendingReview && state.pendingReview.turn_id);
+  if (!turnId) {
+    console.warn('submitReviewDecision: no turn_id');
+    card.remove();
+    state.reviewCardOpen = false;
+    state.pendingReview = null;
+    return;
+  }
+
+  const epiEl = card.querySelector('.review-card-episodic');
+  const memEl = card.querySelector('.review-card-remember');
+  const clueEl = card.querySelector('.review-card-clue');
+
+  const body = Object.assign({
+    action: 'continue',
+    selected_chunk_ids: [],
+    rewritten_query: null,
+    expand_from_doc_id: null,
+    redirect_taxonomy_node_id: null,
+    include_episodic: !!(epiEl && epiEl.checked),
+    remember_choice: !!(memEl && memEl.checked),
+  }, partial || {});
+
+  // If the user edited the clue and clicked Continue, promote to rephrase.
+  if (body.action === 'continue' && state.pendingReview) {
+    const editedClue = ((clueEl && clueEl.value) || '').trim();
+    const origClue = (state.pendingReview.clue || '').trim();
+    const origQ = (state.pendingReview.original_question || '').trim();
+    if (editedClue && editedClue !== origClue && editedClue !== origQ) {
+      body.action = 'rephrase';
+      body.rewritten_query = editedClue;
+    }
+  }
+
+  // If the user kept Continue but unchecked some sources, switch to filter.
+  if (body.action === 'continue') {
+    const rows = Array.from(card.querySelectorAll('.review-card-source'));
+    const checked = rows
+      .filter(r => r.querySelector('.review-card-source-cb').checked)
+      .map(r => r.dataset.chunkId)
+      .filter(Boolean);
+    const total = rows.map(r => r.dataset.chunkId).filter(Boolean);
+    if (checked.length === 0 && total.length > 0) {
+      body.action = 'general';
+    } else if (checked.length < total.length) {
+      body.action = 'filter';
+      body.selected_chunk_ids = checked;
+    }
+  }
+
+  // Collapse the card to a one-line summary above the streaming bubble.
+  const summary = document.createElement('div');
+  summary.className = 'review-card-resolved';
+  summary.textContent = describeDecision(body, state.pendingReview);
+  if (card.parentNode) {
+    card.parentNode.replaceChild(summary, card);
+  }
+  state.reviewCardOpen = false;
+  state.pendingReview = null;
+
+  try {
+    const r = await fetch(`/api/chat/turns/${encodeURIComponent(turnId)}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      console.warn('resume failed', r.status);
+      flashToast('Resume failed — please try again');
+    }
+  } catch (e) {
+    console.error('resume error', e);
+    flashToast('Network error during resume');
+  }
+}
+
+function describeDecision(body, payload) {
+  const action = body.action || 'continue';
+  if (action === 'continue') return 'Reviewed: continuing with all sources';
+  if (action === 'general')  return 'Reviewed: answering from general knowledge';
+  if (action === 'filter')   return `Reviewed: filtered to ${body.selected_chunk_ids.length} source(s)`;
+  if (action === 'rephrase') return `Reviewed: rephrased "${body.rewritten_query}"`;
+  if (action === 'clarify')  return 'Reviewed: asking a clarifying question…';
+  if (action === 'expand_doc')  return 'Reviewed: re-retrieving from one document';
+  if (action === 'redescend')   return 'Reviewed: redirecting taxonomy descent';
+  if (action === 'abort')    return 'Reviewed: cancelled';
+  return `Reviewed: ${action}`;
+}
+
+async function fetchWhySource(row, src, payload) {
+  let whyEl = row.querySelector('.review-card-why-text');
+  if (whyEl) {
+    whyEl.hidden = !whyEl.hidden;
+    if (!whyEl.hidden && whyEl.dataset.fetched === '1') return;
+  } else {
+    whyEl = document.createElement('div');
+    whyEl.className = 'review-card-why-text';
+    whyEl.style.gridColumn = '1 / -1';
+    row.appendChild(whyEl);
+  }
+  whyEl.hidden = false;
+  whyEl.textContent = '…';
+  try {
+    const r = await fetch(`/api/chat/turns/${encodeURIComponent(payload.turn_id)}/why_source`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: payload.original_question || '',
+        title: src.title || '',
+        section: src.section || '',
+        text: src.text || src.snippet || '',
+      }),
+    });
+    const j = await r.json();
+    whyEl.textContent = (j && j.explanation) || 'No explanation available.';
+    whyEl.dataset.fetched = '1';
+  } catch (e) {
+    whyEl.textContent = 'Could not fetch explanation.';
+  }
+}
+
+function renderFollowups(streamEls, chips) {
+  if (!streamEls || !streamEls.wrap) return;
+  let wrap = streamEls.wrap.querySelector('.followups');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.className = 'followups';
+    streamEls.wrap.appendChild(wrap);
+  }
+  wrap.innerHTML = '';
+  chips.slice(0, 3).forEach(text => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'followup-chip';
+    btn.textContent = text;
+    btn.addEventListener('click', () => {
+      const inp = document.getElementById('input');
+      inp.value = text;
+      // Trigger the existing autoResize + send flow.
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('send').click();
+    });
+    wrap.appendChild(btn);
+  });
+}
+
+function initReviewCard() {
+  // The card itself is created dynamically, so we only wire the global
+  // keyboard shortcuts. Per-card button handlers are attached in
+  // renderReviewCard().
+  document.addEventListener('keydown', (e) => {
+    if (!state.reviewCardOpen) return;
+    // Find the active (unresolved) inline review card.
+    const card = document.querySelector('.review-card:not([data-resolved="1"])');
+    if (!card) return;
+
+    const tgt = e.target;
+    const isTextField = tgt && (tgt.tagName === 'TEXTAREA' || tgt.tagName === 'INPUT');
+
+    if (e.key === 'Enter' && !e.shiftKey && !isTextField) {
+      e.preventDefault();
+      submitReviewDecision(card, { action: 'continue' });
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      submitReviewDecision(card, { action: 'abort' });
+      return;
+    }
+    if (!isTextField && /^[1-9]$/.test(e.key)) {
+      const idx = parseInt(e.key, 10) - 1;
+      const row = card.querySelectorAll('.review-card-source')[idx];
+      if (row) {
+        const cb = row.querySelector('.review-card-source-cb');
+        if (cb) cb.checked = !cb.checked;
+        e.preventDefault();
+      }
+      return;
+    }
+    if (!isTextField && (e.key === 'g' || e.key === 'G')) {
+      e.preventDefault();
+      submitReviewDecision(card, { action: 'general' });
+      return;
+    }
+    if (!isTextField && (e.key === 'c' || e.key === 'C')) {
+      e.preventDefault();
+      submitReviewDecision(card, { action: 'clarify' });
+      return;
+    }
+    if (!isTextField && (e.key === 'e' || e.key === 'E')) {
+      e.preventDefault();
+      const ce = card.querySelector('.review-card-clue');
+      if (ce) ce.focus();
+      return;
+    }
+    if (!isTextField && (e.key === 'r' || e.key === 'R')) {
+      // Cycle focus through rephrasing chips.
+      e.preventDefault();
+      const chips = Array.from(card.querySelectorAll('.review-rephrasing-chip'));
+      if (chips.length) {
+        const idx = chips.findIndex(c => c === document.activeElement);
+        const next = chips[(idx + 1) % chips.length];
+        next.focus();
+      }
+    }
+  });
 }
 
 // ---------- memories ----------
@@ -1784,15 +2420,25 @@ function startMemoryAdd() {
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving…';
     try {
-      const r = await fetch('/api/memories', {
+      // Background flow: returns immediately with a job_id, global job
+      // bar shows the embed progress, list reloads via onJobFinished().
+      const r = await fetch('/api/memories?background=true', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      flashToast('memory added');
-      await loadMemories();
-      refreshSidebarCounts();
+      const data = await r.json().catch(() => ({}));
+      const snippet = text.slice(0, 50) + (text.length > 50 ? '…' : '');
+      if (data.background && data.job_id) {
+        trackJob(data.job_id, 'memory_embed', `Embedding memory: "${snippet}"`);
+        card.remove();
+      } else {
+        // server fell back to sync (e.g. older deploy); behave as before
+        flashToast('memory added');
+        await loadMemories();
+        refreshSidebarCounts();
+      }
     } catch (e) {
       flashToast('add failed: ' + e.message);
       saveBtn.disabled = false;
@@ -1816,7 +2462,7 @@ async function rememberFromComposer() {
     btn.disabled = true;
   }
   try {
-    const r = await fetch('/api/memories', {
+    const r = await fetch('/api/memories?background=true', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
@@ -1830,7 +2476,13 @@ async function rememberFromComposer() {
       // Re-disable the send button (textarea is now empty).
       sendBtn.disabled = true;
     }
-    flashToast('remembered · ' + (data.memory_id ? data.memory_id.slice(0, 12) + '…' : 'saved'));
+    if (data.background && data.job_id) {
+      const snippet = text.slice(0, 50) + (text.length > 50 ? '…' : '');
+      trackJob(data.job_id, 'memory_embed', `Embedding memory: "${snippet}"`);
+      flashToast('queued · embedding in background');
+    } else {
+      flashToast('remembered · ' + (data.memory_id ? data.memory_id.slice(0, 12) + '…' : 'saved'));
+    }
     refreshSidebarCounts();
   } catch (e) {
     flashToast('remember failed: ' + (e.message || e));
@@ -1996,13 +2648,19 @@ async function saveSmartRememberSelected() {
   let saved = 0, failed = 0;
   for (let i = 0; i < items.length; i++) {
     sub.textContent = `Saving ${i + 1}/${items.length}…`;
+    const text = (items[i].text || '').trim();
     try {
-      const r = await fetch('/api/memories', {
+      const r = await fetch('/api/memories?background=true', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: (items[i].text || '').trim() }),
+        body: JSON.stringify({ text }),
       });
       if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json().catch(() => ({}));
+      if (data.background && data.job_id) {
+        const snippet = text.slice(0, 50) + (text.length > 50 ? '…' : '');
+        trackJob(data.job_id, 'memory_embed', `Embedding memory: "${snippet}"`);
+      }
       saved++;
     } catch {
       failed++;
@@ -2079,14 +2737,548 @@ function paintDocs(items) {
   }
 }
 
+// ---------- SOTA per-file ingest progress tracker ----------
+// Drives the .job-drawer (bottom-right floating stack of .job-card elements).
+// Public entry point is trackJob(jobId, kind, label, file?) — every upload
+// + memory POST already calls it. Each job polls /api/jobs/{id} every 250 ms
+// for tight liveness; the server-side `_flush_job_state` is throttled to
+// ~5 writes/sec so we're not in lockstep.
+//
+// Card contents:
+//   - filename, elapsed counter, ETA, throughput (c/s)
+//   - 6-stage chip strip: Load → Chunk → Filter → Embed → Index → Assign
+//   - two-layer bar: faint underlay (total %), bright fill (active-stage %)
+//   - expandable detail: per-stage durations + last 12 log lines
+//   - red error state with the exception message
+//   - ✕ cancel button → POST /api/jobs/{id}/cancel
+//
+// After a job reaches a terminal state we keep the card visible for 4 s so
+// the user sees the final ✓ / ✗ / cancelled flourish, then fade it out.
+
+const _jobs = new Map();  // job_id → state object
+const _jobPolling = new Set();  // re-entrancy guard
+const _jobAnchor = () => document.getElementById('job-drawer');
+
+const JOB_STAGES = ['load', 'chunk', 'filter', 'embed', 'index', 'assign'];
+const JOB_STAGE_LABELS = {
+  load: 'Load', chunk: 'Chunk', filter: 'Filter',
+  embed: 'Embed', index: 'Index', assign: 'Assign',
+};
+const MEMORY_STAGES = ['embed', 'index'];
+
+function trackJob(jobId, kind, label, file) {
+  if (!jobId) return;
+  if (_jobs.has(jobId)) {
+    // Refresh label if the caller relabels an in-flight job.
+    const cur = _jobs.get(jobId);
+    if (label) cur.label = label;
+    renderJobs();
+    return;
+  }
+  _jobs.set(jobId, {
+    jobId,
+    kind: kind || 'job',
+    label: label || (kind || 'job'),
+    file: file || null,
+    status: 'queued',
+    progress: 0,
+    total: 1,
+    message: '',
+    result: null,
+    stages: {},
+    current_stage: null,
+    files: [],
+    errors: [],
+    startedAt: performance.now(),
+    eta: null,
+    throughput: null,
+    recentSamples: [],
+    detailOpen: false,
+    logLines: [],
+    _terminalAt: null,
+  });
+  renderJobs();
+  if (!_jobPolling.has(jobId)) pollJobLoop(jobId);
+}
+
+async function pollJobLoop(jobId) {
+  _jobPolling.add(jobId);
+  const POLL_MS = 250;     // tight enough for SOTA feel
+  // Worst case: 30 min at 250 ms = 7200 attempts. Most jobs finish in seconds.
+  for (let attempt = 0; attempt < 7200; attempt++) {
+    const j = _jobs.get(jobId);
+    if (!j) { _jobPolling.delete(jobId); return; }
+    try {
+      const r = await fetch('/api/jobs/' + encodeURIComponent(jobId));
+      if (r.ok) {
+        const data = await r.json();
+        applyJobUpdate(jobId, data);
+      }
+    } catch (e) { /* network blip — keep polling */ }
+    const cur = _jobs.get(jobId);
+    if (!cur) { _jobPolling.delete(jobId); return; }
+    if (cur.status === 'done' || cur.status === 'failed' || cur.status === 'cancelled') {
+      // Let the success/fail/cancelled state linger for 4s, then auto-fade.
+      _jobPolling.delete(jobId);
+      setTimeout(() => onJobFinished(jobId), 4000);
+      return;
+    }
+    await new Promise(rs => setTimeout(rs, POLL_MS));
+  }
+  _jobPolling.delete(jobId);
+}
+
+function applyJobUpdate(jobId, data) {
+  const j = _jobs.get(jobId);
+  if (!j) return;
+  j.status = data.status || j.status;
+  j.progress = data.progress != null ? data.progress : j.progress;
+  j.total = data.total != null ? data.total : (j.total || 1);
+  j.message = data.message || j.message;
+  // The server stores per-stage detail inside `result` (JSON).
+  let parsed = data.result;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+  }
+  if (parsed && typeof parsed === 'object') {
+    j.result = parsed;
+    j.stages = parsed.stages || {};
+    j.current_stage = parsed.current_stage || j.current_stage;
+    j.files = parsed.files || [];
+    j.errors = parsed.errors || [];
+  }
+
+  // Compute throughput + ETA from the embed stage if active.
+  const embed = j.stages.embed;
+  if (embed && embed.n_total > 0) {
+    const sample = { ts: performance.now(), n_done: embed.n_done || 0 };
+    j.recentSamples.push(sample);
+    if (j.recentSamples.length > 12) j.recentSamples.shift();
+    if (j.recentSamples.length >= 2) {
+      const first = j.recentSamples[0];
+      const last = j.recentSamples[j.recentSamples.length - 1];
+      const dt_s = (last.ts - first.ts) / 1000;
+      const dn = last.n_done - first.n_done;
+      if (dt_s > 0.15) {
+        j.throughput = dn / dt_s;
+        const remaining = embed.n_total - embed.n_done;
+        if (j.throughput > 0.01) j.eta = remaining / j.throughput;
+      }
+    }
+  }
+
+  // Append message to the log if it changed.
+  if (j.message && (j.logLines.length === 0 || j.logLines[j.logLines.length-1] !== j.message)) {
+    j.logLines.push(j.message);
+    if (j.logLines.length > 30) j.logLines.shift();
+  }
+
+  renderJobs();
+}
+
+function renderJobs() {
+  const drawer = _jobAnchor();
+  if (!drawer) return;
+  if (_jobs.size === 0) {
+    drawer.hidden = true;
+    drawer.innerHTML = '';
+    return;
+  }
+  drawer.hidden = false;
+  // Newest first; keep up to 5 visible, fold the rest behind a count badge.
+  const ids = Array.from(_jobs.keys()).reverse();
+  const visibleIds = ids.slice(0, 5);
+  const hiddenCount = ids.length - visibleIds.length;
+
+  // Index existing children by jobId so we can reuse them and avoid layout
+  // thrash on every poll.
+  const existing = new Map();
+  for (const el of Array.from(drawer.children)) {
+    const id = el.dataset && el.dataset.jobId;
+    if (id) existing.set(id, el);
+  }
+  drawer.innerHTML = '';
+  for (const id of visibleIds) {
+    const j = _jobs.get(id);
+    let card = existing.get(id);
+    if (!card || !card.classList.contains('job-card')) {
+      card = buildJobCard(id, j);
+    } else {
+      updateJobCard(card, id, j);
+    }
+    drawer.appendChild(card);
+  }
+  if (hiddenCount > 0) {
+    const more = document.createElement('div');
+    more.className = 'job-drawer-collapsed';
+    more.textContent = `+ ${hiddenCount} more job${hiddenCount === 1 ? '' : 's'}`;
+    drawer.appendChild(more);
+  }
+}
+
+function _jobStagesFor(j) {
+  return (j.kind === 'memory_embed') ? MEMORY_STAGES : JOB_STAGES;
+}
+
+function buildJobCard(jobId, j) {
+  const card = document.createElement('div');
+  card.className = 'job-card';
+  card.dataset.jobId = jobId;
+  card.dataset.status = j.status;
+
+  card.innerHTML = `
+    <div class="job-card-head">
+      <div class="job-card-icon">⟳</div>
+      <div class="job-card-title">
+        <div class="job-card-name"></div>
+        <div class="job-card-meta"></div>
+      </div>
+      <button class="job-card-cancel" type="button" title="Cancel">✕</button>
+    </div>
+    <div class="job-card-stages"></div>
+    <div class="job-card-bar">
+      <div class="job-card-bar-underlay"></div>
+      <div class="job-card-bar-fill"></div>
+    </div>
+    <button class="job-card-detail-toggle" type="button" aria-expanded="false">Details</button>
+    <div class="job-card-detail" hidden>
+      <div class="job-card-detail-rows"></div>
+      <div class="job-card-detail-log"></div>
+    </div>
+  `;
+
+  // Cancel button — terminal states relabel it "Dismiss".
+  const cancelBtn = card.querySelector('.job-card-cancel');
+  cancelBtn.addEventListener('click', () => {
+    const cur = _jobs.get(jobId);
+    if (!cur) return;
+    if (cur.status === 'running' || cur.status === 'queued') {
+      cancelJob(jobId);
+    } else {
+      // Already terminal — just dismiss the card.
+      _jobs.delete(jobId);
+      renderJobs();
+    }
+  });
+
+  // Detail toggle
+  const toggle = card.querySelector('.job-card-detail-toggle');
+  toggle.addEventListener('click', () => {
+    const open = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+    card.querySelector('.job-card-detail').hidden = open;
+    const cur = _jobs.get(jobId);
+    if (cur) cur.detailOpen = !open;
+  });
+
+  updateJobCard(card, jobId, j);
+  return card;
+}
+
+function updateJobCard(card, jobId, j) {
+  card.dataset.status = j.status;
+  const stages = _jobStagesFor(j);
+
+  // Title + meta line.
+  const nameEl = card.querySelector('.job-card-name');
+  const fname = (j.files && j.files[0] && j.files[0].name) || j.label || j.kind;
+  nameEl.textContent = fname;
+  nameEl.title = fname;
+  card.querySelector('.job-card-meta').textContent = formatJobMeta(j);
+
+  // Cancel/dismiss label.
+  const cancelBtn = card.querySelector('.job-card-cancel');
+  if (j.status === 'done' || j.status === 'failed' || j.status === 'cancelled') {
+    cancelBtn.textContent = '×';
+    cancelBtn.title = 'Dismiss';
+  } else {
+    cancelBtn.textContent = '✕';
+    cancelBtn.title = 'Cancel';
+  }
+
+  // Stage chips.
+  const stagesEl = card.querySelector('.job-card-stages');
+  stagesEl.innerHTML = '';
+  for (const s of stages) {
+    const chip = document.createElement('div');
+    chip.className = 'job-stage';
+    chip.dataset.stage = s;
+    chip.textContent = JOB_STAGE_LABELS[s] || s;
+    const data = j.stages[s];
+    if (j.errors && j.errors.length && j.current_stage === s) {
+      chip.classList.add('failed');
+    } else if (data && data.ts_end && data.n_done >= data.n_total) {
+      chip.classList.add('done');
+    } else if (j.current_stage === s) {
+      chip.classList.add('active');
+    } else {
+      chip.classList.add('pending');
+    }
+    stagesEl.appendChild(chip);
+  }
+
+  // Two-layer progress bar.
+  const totalPct = computeTotalPct(j, stages);
+  const stagePct = computeStagePct(j);
+  card.querySelector('.job-card-bar-underlay').style.setProperty('--total-pct', `${totalPct}%`);
+  card.querySelector('.job-card-bar-fill').style.setProperty('--stage-pct', `${stagePct}%`);
+
+  // Detail panel — auto-open on failure.
+  const detailEl = card.querySelector('.job-card-detail');
+  const toggleEl = card.querySelector('.job-card-detail-toggle');
+  const shouldOpen = j.detailOpen || j.status === 'failed';
+  if (shouldOpen) {
+    detailEl.hidden = false;
+    toggleEl.setAttribute('aria-expanded', 'true');
+    const rows = card.querySelector('.job-card-detail-rows');
+    rows.innerHTML = '';
+    for (const s of stages) {
+      const data = j.stages[s] || {};
+      const done = data.ts_end && data.n_done >= data.n_total;
+      const active = j.current_stage === s && !done;
+      const name = document.createElement('div');
+      name.className = 'stage-name';
+      name.textContent = JOB_STAGE_LABELS[s] || s;
+      const status = document.createElement('div');
+      status.className = done ? 'stage-done' : (active ? 'stage-active' : 'stage-pending');
+      status.textContent = done ? '✓' : (active ? '…' : '');
+      const duration = document.createElement('div');
+      duration.className = done ? 'stage-done' : 'stage-pending';
+      duration.textContent = (data.duration_s != null)
+        ? `${Number(data.duration_s).toFixed(1)}s`
+        : '';
+      rows.appendChild(name);
+      rows.appendChild(status);
+      rows.appendChild(duration);
+    }
+    const log = card.querySelector('.job-card-detail-log');
+    log.textContent = (j.logLines || []).slice(-12).join('\n');
+  }
+
+  // Error pane (single row, always at the bottom of the detail pane).
+  let errEl = card.querySelector('.job-card-error');
+  if (j.errors && j.errors.length) {
+    if (!errEl) {
+      errEl = document.createElement('div');
+      errEl.className = 'job-card-error';
+      detailEl.appendChild(errEl);
+    }
+    const last = j.errors[j.errors.length - 1];
+    errEl.textContent = (last && last.error) ? last.error : 'Failed';
+  } else if (errEl) {
+    errEl.remove();
+  }
+}
+
+function formatJobMeta(j) {
+  const stage = j.current_stage || (j.status === 'queued' ? 'queued' : 'running');
+  const data = j.stages[stage] || {};
+  const parts = [];
+  // Stage label
+  parts.push(JOB_STAGE_LABELS[stage] || stage);
+  // Counts (skip when n_total is 1 or missing — meaningless)
+  if (data.n_total && data.n_total > 1) {
+    parts.push(`${data.n_done || 0}/${data.n_total}`);
+  }
+  // Throughput + ETA (only meaningful for embed)
+  if (j.throughput && stage === 'embed' && j.throughput > 0.05) {
+    parts.push(`${j.throughput.toFixed(1)} c/s`);
+  }
+  if (j.eta != null && stage === 'embed' && j.eta > 0.5 && j.eta < 3600) {
+    parts.push(`ETA ${formatDuration(j.eta)}`);
+  }
+  // Elapsed (always)
+  const elapsed = (performance.now() - j.startedAt) / 1000;
+  parts.push(`${formatDuration(elapsed)} elapsed`);
+  // Terminal summary
+  if (j.status === 'done') {
+    const nc = (j.files && j.files[0] && j.files[0].n_chunks) || (j.result && j.result.n_chunks);
+    if (nc) parts.push(`${nc} chunks`);
+  } else if (j.status === 'cancelled') {
+    parts.push('cancelled');
+  } else if (j.status === 'failed') {
+    parts.push('failed');
+  }
+  return parts.join(' · ');
+}
+
+function formatDuration(seconds) {
+  if (seconds < 1) return `${Math.round(seconds*1000)}ms`;
+  if (seconds < 60) return `${seconds.toFixed(0)}s`;
+  const m = Math.floor(seconds/60); const s = Math.floor(seconds % 60);
+  return `${m}m${s}s`;
+}
+
+function computeTotalPct(j, stages) {
+  // Each stage contributes 1/N once fully done; partial contribution for the
+  // active stage based on its own n_done/n_total ratio.
+  let cum = 0;
+  for (const s of stages) {
+    const d = j.stages[s];
+    if (!d) continue;
+    if (d.ts_end && d.n_done >= d.n_total) cum += 1;
+    else if (j.current_stage === s) {
+      cum += d.n_total ? Math.min(1, (d.n_done || 0) / d.n_total) : 0;
+    }
+  }
+  const pct = (cum / stages.length) * 100;
+  return Math.max(0, Math.min(100, pct));
+}
+
+function computeStagePct(j) {
+  const d = j.stages[j.current_stage] || null;
+  if (!d || !d.n_total) return 0;
+  return Math.max(2, Math.min(100, ((d.n_done || 0) / d.n_total) * 100));
+}
+
+async function cancelJob(jobId) {
+  try {
+    await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' });
+  } catch (e) { /* defensive — UI already optimistic */ }
+  const j = _jobs.get(jobId);
+  if (j) {
+    j.status = 'cancelled';
+    renderJobs();
+  }
+}
+
+function onJobFinished(jobId) {
+  const card = document.querySelector(`.job-card[data-job-id="${jobId}"]`);
+  const j = _jobs.get(jobId);
+
+  // Per-kind post-completion side effects (parity with old onJobFinished).
+  if (j && j.status === 'done' && j.kind === 'doc_ingest') {
+    let res = j.result || {};
+    if (typeof res === 'string') { try { res = JSON.parse(res); } catch { res = {}; } }
+    if (res && res.taxonomy_mode === 'manual' && res.doc_id) {
+      try { promptTaxonomyChoice(res.doc_id, res.title || j.label); } catch {}
+    }
+  }
+  if (j && j.status === 'done' && j.kind === 'memory_embed') {
+    try {
+      const drawer = document.getElementById('memories-drawer');
+      const visible = drawer && !drawer.classList.contains('hidden')
+        && drawer.getAttribute('aria-hidden') !== 'true';
+      if (visible && typeof loadMemories === 'function') loadMemories();
+    } catch {}
+    try { refreshSidebarCounts && refreshSidebarCounts(); } catch {}
+  }
+
+  if (card) {
+    card.style.transition = 'opacity 300ms ease-out, transform 300ms ease-out';
+    card.style.opacity = '0';
+    card.style.transform = 'translateY(8px) scale(0.97)';
+    setTimeout(() => {
+      _jobs.delete(jobId);
+      renderJobs();
+    }, 320);
+  } else {
+    _jobs.delete(jobId);
+    renderJobs();
+  }
+}
+
+// Manual-mode banner shown on the Taxonomy page after a doc-ingest job
+// completes with taxonomy_mode=manual. Switches to the Taxonomy view and
+// drops a small inline pill ("<title> is unfiled. [Auto-assign]").
+function promptTaxonomyChoice(docId, title) {
+  if (!docId) return;
+  // 1. Switch to the Taxonomy page (the existing handler reloads the tree).
+  try {
+    const navBtn = document.getElementById('open-taxonomy')
+      || document.getElementById('nav-taxonomy')
+      || document.querySelector('[data-nav="taxonomy"]');
+    if (navBtn) navBtn.click();
+  } catch { /* if taxonomy nav isn't present we still show the banner */ }
+
+  // 2. Find a host element on the Taxonomy page to drop the banner into;
+  //    fall back to <body> so the message never gets lost.
+  const host = document.getElementById('taxonomy-page')
+    || document.querySelector('.tax-toolbar')?.parentElement
+    || document.body;
+  if (!host) return;
+
+  // Replace any prior banner for the same doc.
+  const prev = host.querySelector(`.tax-manual-banner[data-doc="${CSS.escape(docId)}"]`);
+  if (prev) prev.remove();
+
+  const banner = document.createElement('div');
+  banner.className = 'tax-manual-banner';
+  banner.dataset.doc = docId;
+
+  const msg = document.createElement('div');
+  msg.className = 'tax-manual-banner-msg';
+  const titleSafe = title || docId.slice(0, 16);
+  msg.textContent = `"${titleSafe}" is unfiled. Drag it onto a node, or auto-assign it now.`;
+
+  const autoBtn = document.createElement('button');
+  autoBtn.type = 'button';
+  autoBtn.textContent = 'Auto-assign';
+  autoBtn.addEventListener('click', async () => {
+    autoBtn.disabled = true;
+    autoBtn.textContent = 'Assigning…';
+    try {
+      const r = await fetch(
+        '/api/taxonomy/auto-assign/' + encodeURIComponent(docId),
+        { method: 'POST' },
+      );
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      flashToast && flashToast(
+        data.assigned_node
+          ? 'Filed under ' + data.assigned_node
+          : 'Tree empty — still unfiled'
+      );
+      banner.remove();
+      // Reload the tree so the doc moves out of the unfiled list.
+      if (typeof loadTaxonomyTree === 'function') {
+        try { await loadTaxonomyTree(); } catch { /* ignore */ }
+      }
+    } catch (e) {
+      autoBtn.disabled = false;
+      autoBtn.textContent = 'Auto-assign';
+      flashToast && flashToast('auto-assign failed: ' + (e.message || e));
+    }
+  });
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'tmb-close';
+  closeBtn.setAttribute('aria-label', 'Dismiss');
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', () => banner.remove());
+
+  banner.appendChild(msg);
+  banner.appendChild(autoBtn);
+  banner.appendChild(closeBtn);
+
+  // Insert near the top of the host so it's the first thing the user sees.
+  host.insertBefore(banner, host.firstChild);
+}
+
 // ---------- upload (background-job flow) ----------
+// Reads the .upload-taxonomy-choice radio group to pick "auto" vs "manual".
+// "manual" tells the server to skip the auto-assign hook so the doc lands
+// in the unfiled list; trackJob() then routes the user to the Taxonomy
+// page when the job finishes.
+function _readTaxonomyMode() {
+  try {
+    const picked = document.querySelector(
+      '#upload-taxonomy-choice input[name="taxmode"]:checked'
+    );
+    const v = picked ? picked.value : 'auto';
+    return (v === 'manual' || v === 'skip') ? 'manual' : 'auto';
+  } catch { return 'auto'; }
+}
+
 async function handleUploadFiles(fileList) {
   if (!fileList || !fileList.length) return;
   const files = Array.from(fileList);
   uploadProgressEl.innerHTML = '';
 
+  const taxMode = _readTaxonomyMode();
   // Kick off all uploads in parallel — server runs each as a daemon thread.
-  await Promise.all(files.map(f => uploadOne(f)));
+  await Promise.all(files.map(f => uploadOne(f, taxMode)));
 
   // refresh listings after all jobs settle
   await loadDocs();
@@ -2094,7 +3286,7 @@ async function handleUploadFiles(fileList) {
   uploadInputEl.value = '';  // allow re-uploading the same file
 }
 
-async function uploadOne(f) {
+async function uploadOne(f, taxMode = 'auto') {
   const row = document.createElement('div');
   row.className = 'upload-row pending';
   row.innerHTML = `
@@ -2107,11 +3299,14 @@ async function uploadOne(f) {
   try {
     const form = new FormData();
     form.append('file', f);
-    // background=true is the server default; explicit for clarity
-    const r = await fetch('/api/ingest?background=true', { method: 'POST', body: form });
+    const url = '/api/ingest?background=true&taxonomy_mode=' +
+      encodeURIComponent(taxMode);
+    const r = await fetch(url, { method: 'POST', body: form });
     if (!r.ok) throw new Error(await r.text() || ('HTTP ' + r.status));
     const { job_id } = await r.json();
     status.textContent = 'queued…';
+    // Mirror the per-row spinner into the global job bar.
+    trackJob(job_id, 'doc_ingest', `Ingesting: ${f.name}`);
     await pollJob(job_id, row);
   } catch (e) {
     row.classList.remove('pending');

@@ -8,6 +8,7 @@ a no-op. Called from `init_db` after `init_schema`.
 
 from __future__ import annotations
 
+import sqlite3
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,3 +31,12 @@ def run_migrations(db: "Database") -> None:
     with db.conn:
         for stmt in _MIGRATIONS:
             db.conn.execute(stmt)
+
+    # Phase 8: add metadata column to messages (JSON-encoded review decision).
+    # ALTER TABLE ADD COLUMN is idempotent via try/except on the duplicate-column error.
+    try:
+        with db.conn:
+            db.conn.execute("ALTER TABLE messages ADD COLUMN metadata TEXT")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise

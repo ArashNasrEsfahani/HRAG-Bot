@@ -31,9 +31,13 @@
   --t-base: 200ms;
   --t-slow: 380ms;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --font: 'Inter', 'Vazirmatn', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-fa: 'Vazirmatn', 'Inter', system-ui, 'Tahoma', sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  /* Bilingual stack — Latin glyphs come from Inter / Segoe UI, Persian /
+   * Arabic glyphs from Vazirmatn (webfont loaded by index.html) with
+   * IRANYekan / Iran Sans / Tahoma as system fallbacks if the webfont
+   * never lands. The user's Windows install always has Tahoma at least. */
+  --font: 'Inter', 'Segoe UI', 'Vazirmatn', 'IRANYekan', 'Iran Sans', 'Tahoma', system-ui, -apple-system, Roboto, sans-serif;
+  --font-fa: 'Vazirmatn', 'IRANYekan', 'Iran Sans', 'Tahoma', 'Inter', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Consolas, monospace;
   --sidebar-w: 272px;
   --main-pad: clamp(16px, 4vw, 32px);
   --message-w: 760px;
@@ -526,6 +530,20 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 @keyframes blink {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
+}
+
+/* incremental-markdown streaming caret — sits inline at the end of the
+   rendered HTML and blinks while tokens are still arriving. Stripped at
+   final-event time. direction:inherit keeps it sane in RTL paragraphs. */
+.md-cursor {
+  display: inline-block;
+  width: 7px; height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+  border-radius: 1px;
+  direction: inherit;
+  animation: blink 1s steps(1) infinite;
 }
 
 /* progress/phase chips above streaming message */
@@ -1486,7 +1504,11 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   50%      { transform: translateY(-5px); }
 }
 
-/* ----- RTL / Persian --------------------------------------- */
+/* ----- RTL / Persian / bilingual BiDi ---------------------- */
+/* Hard direction flip when an element is explicitly tagged Persian or
+ * marked RTL. `dir="auto"` is handled separately below — the browser
+ * picks RTL/LTR per first strong character and we just need to ensure
+ * per-paragraph BiDi resolution and that the Persian font kicks in. */
 :lang(fa), [dir="rtl"] {
   direction: rtl;
   text-align: right;
@@ -1496,6 +1518,42 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   direction: ltr;
   unicode-bidi: embed;
   font-family: var(--mono);
+}
+
+/* Per-paragraph BiDi resolution inside markdown-rendered bubbles. Without
+ * this, a mixed sentence like "محمود monfared دوست شماست" has the embedded
+ * "monfared" jumping around weirdly when the bubble itself has dir="auto". */
+.bubble,
+.bubble p,
+.bubble li,
+.bubble blockquote,
+.bubble h1, .bubble h2, .bubble h3, .bubble h4 {
+  unicode-bidi: plaintext;
+}
+
+/* Inline code stays LTR even when embedded in an RTL paragraph. */
+.bubble code {
+  unicode-bidi: embed;
+  direction: ltr;
+  font-family: var(--mono);
+}
+
+/* Code blocks are always LTR + left-aligned regardless of surrounding dir. */
+.bubble pre,
+.bubble pre code {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: embed;
+}
+
+/* Numeric reasoning trace, source scores, and review-card source metadata
+ * stay LTR so digits read in the natural order even on Farsi turns. */
+.review-card-source-score,
+.review-card-source-idx,
+.trace-step,
+.src-meta {
+  direction: ltr;
+  unicode-bidi: embed;
 }
 
 /* ----- per-message feedback buttons (Track D1) ------------- */
@@ -2800,3 +2858,383 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
   font-size: 0.72rem;
   font-feature-settings: 'tnum' 1;
 }
+
+/* ─── Phase 8: inline review card (no modal — lives inside the assistant
+   message wrap, BEFORE the streaming bubble) ─────────────────────── */
+
+.review-card {
+  margin-top: 8px; margin-bottom: 6px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+}
+.review-card-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--ink); margin-bottom: 8px;
+}
+.review-card-title { font-weight: 600; color: var(--ink-bright); }
+.review-card-reasons { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+.review-reason-chip {
+  font-size: 0.70rem; padding: 3px 9px; border-radius: 999px;
+  background: rgba(232, 220, 196, 0.10);
+  color: var(--accent);
+  border: 1px solid rgba(232, 220, 196, 0.28);
+}
+
+.review-card-body { display: flex; flex-direction: column; gap: 8px; }
+.review-card-clue-row {
+  display: flex; gap: 6px; align-items: center;
+}
+.review-card-clue {
+  flex: 1; box-sizing: border-box;
+  background: var(--bg-elev); color: var(--ink-bright);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 9px; font-size: 13px; font-family: inherit;
+}
+.review-card-clue:focus { outline: 1px solid var(--accent); }
+
+.review-card-rephrasings, .review-card-breadcrumb {
+  display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+}
+.review-rephrasing-chip {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink);
+  border: 1px solid var(--line-2);
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 0.78rem; cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.review-rephrasing-chip:hover { border-color: var(--accent); background: rgba(232, 220, 196, 0.06); }
+
+.review-breadcrumb-node {
+  background: transparent; border: none; color: var(--accent);
+  font-size: 0.78rem; cursor: pointer; padding: 2px 4px;
+  transition: text-decoration var(--t-fast);
+}
+.review-breadcrumb-node:hover { text-decoration: underline; }
+.review-breadcrumb-sep { color: var(--muted); font-size: 0.72rem; }
+
+.review-card-sources {
+  display: flex; flex-direction: column; gap: 5px;
+  max-height: 200px; overflow-y: auto;
+  padding-right: 4px;
+}
+.review-card-source {
+  display: grid; grid-template-columns: 18px auto 1fr auto;
+  gap: 8px; align-items: center; padding: 5px 8px;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: 6px;
+  font-size: 12px;
+}
+.review-card-source-cb { margin: 0; cursor: pointer; accent-color: var(--accent); }
+.review-card-source-idx { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 18px; }
+.review-card-source-title { font-weight: 500; color: var(--ink-bright); }
+.review-card-source-snippet {
+  grid-column: 1 / -1;
+  color: var(--muted); font-size: 11.5px;
+  margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
+}
+.review-card-source-snippet.expanded {
+  white-space: normal; max-height: 140px; overflow-y: auto;
+}
+.review-card-source-actions { display: flex; gap: 4px; }
+.review-card-source-actions button {
+  background: transparent; border: 1px solid var(--line-2);
+  color: var(--muted); font-size: 10.5px;
+  padding: 1px 6px; border-radius: 4px; cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast);
+}
+.review-card-source-actions button:hover { color: var(--ink-bright); border-color: var(--accent); }
+.review-card-why-text {
+  grid-column: 1 / -1;
+  padding: 5px 8px; margin-top: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--accent);
+  font-size: 11.5px; line-height: 1.4;
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.review-card-foot {
+  display: flex; flex-wrap: wrap; justify-content: space-between;
+  align-items: center; gap: 8px;
+  margin-top: 6px; padding-top: 6px;
+  border-top: 1px dashed var(--line-2);
+}
+.review-card-foot-toggles { display: flex; gap: 12px; flex-wrap: wrap; }
+.review-toggle {
+  display: inline-flex; gap: 4px; align-items: center;
+  font-size: 11.5px; color: var(--muted); cursor: pointer;
+}
+.review-toggle input { accent-color: var(--accent); }
+.review-card-foot-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.review-card-foot-actions button {
+  font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+.review-card-foot-actions .ghost {
+  background: transparent; border: 1px solid var(--line-2); color: var(--muted);
+}
+.review-card-foot-actions .ghost:hover { border-color: var(--accent); color: var(--ink-bright); }
+.review-card-foot-actions .primary {
+  background: var(--accent); border: 1px solid var(--accent); color: var(--bg);
+  font-weight: 600;
+}
+.review-card-foot-actions .primary:hover { transform: translateY(-1px); }
+
+.review-card-hint {
+  margin-top: 6px;
+  font-size: 10.5px; color: var(--muted); opacity: 0.7;
+  font-family: var(--mono); letter-spacing: 0.02em;
+}
+
+/* When the user resolves the card, collapse it to a one-line summary
+   above the streaming answer bubble. */
+.review-card-resolved {
+  margin: 4px 0 6px;
+  padding: 4px 10px;
+  font-size: 11.5px; color: var(--muted);
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+}
+
+/* Phase 8 — post-answer follow-up chips (rendered under the assistant bubble) */
+.followups {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
+}
+.followup-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  font-size: 0.78rem; padding: 5px 11px; border-radius: 999px; cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+.followup-chip:hover { border-color: var(--accent); color: var(--ink); background: rgba(232, 220, 196, 0.06); }
+
+/* ===== SOTA per-file ingest progress drawer ============================ */
+/* Floating bottom-right stack of .job-card elements. Driven by
+   renderJobs() / buildJobCard() / updateJobCard() in app.js. Each card
+   shows stage chips, throughput, ETA, cancel, expandable detail. */
+.job-drawer {
+  position: fixed; right: 16px; bottom: 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 60vh; overflow-y: auto;
+  z-index: 60;
+  pointer-events: none;
+  padding-right: 2px;
+}
+.job-drawer[hidden] { display: none !important; }
+.job-drawer > .job-card { pointer-events: auto; }
+.job-drawer-collapsed {
+  pointer-events: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  cursor: pointer;
+}
+.job-drawer-collapsed:hover { color: var(--ink-bright); }
+
+.job-card {
+  width: 360px; max-width: calc(100vw - 32px);
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: jobcard-in 220ms cubic-bezier(.25,1,.5,1);
+}
+[data-theme="light"] .job-card {
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+@keyframes jobcard-in {
+  from { transform: translateY(8px) scale(0.97); opacity: 0; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
+}
+.job-card[data-status="done"]      { border-color: rgba(120, 200, 130, 0.45); }
+.job-card[data-status="failed"]    { border-color: rgba(220, 100, 100, 0.55); }
+.job-card[data-status="cancelled"] { border-color: rgba(200, 180, 100, 0.55); }
+
+.job-card-head {
+  display: grid; grid-template-columns: 22px 1fr 22px;
+  gap: 8px; align-items: start;
+}
+.job-card-icon {
+  font-size: 14px; line-height: 22px; text-align: center;
+  color: var(--accent);
+}
+.job-card[data-status="running"] .job-card-icon,
+.job-card[data-status="queued"]  .job-card-icon {
+  animation: jobcard-spin 1.4s linear infinite;
+  transform-origin: 50% 50%;
+}
+.job-card[data-status="done"]      .job-card-icon { animation: none; color: #6fbf73; }
+.job-card[data-status="failed"]    .job-card-icon { animation: none; color: #c66; }
+.job-card[data-status="cancelled"] .job-card-icon { animation: none; color: #d6c168; }
+@keyframes jobcard-spin { to { transform: rotate(360deg); } }
+
+.job-card-name {
+  font-weight: 600; color: var(--ink-bright);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.job-card-meta {
+  font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.job-card-cancel {
+  background: transparent; border: none; color: var(--muted);
+  font-size: 14px; cursor: pointer;
+  width: 22px; height: 22px; line-height: 1;
+  border-radius: 6px;
+}
+.job-card-cancel:hover { color: var(--ink-bright); background: rgba(255,255,255,0.04); }
+[data-theme="light"] .job-card-cancel:hover { background: rgba(0,0,0,0.04); }
+
+.job-card-stages {
+  display: flex; gap: 4px; margin: 10px 0 8px;
+  align-items: center;
+}
+.job-stage {
+  flex: 1; min-width: 0;
+  font-size: 10px; text-align: center;
+  padding: 3px 0;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.03);
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition: background 200ms, color 200ms, border-color 200ms;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+[data-theme="light"] .job-stage { background: rgba(0,0,0,0.03); }
+.job-stage.pending { opacity: 0.55; }
+.job-stage.done    { background: rgba(120, 200, 130, 0.12); color: #6fbf73; border-color: rgba(120,200,130,0.30); }
+.job-stage.active  { background: rgba(109, 168, 255, 0.15); color: var(--ink-bright); border-color: rgba(109,168,255,0.40); animation: jobstage-pulse 1.4s ease-in-out infinite; }
+.job-stage.failed  { background: rgba(200, 100, 100, 0.15); color: #c66; border-color: rgba(200,100,100,0.40); }
+@keyframes jobstage-pulse {
+  50% { background: rgba(109, 168, 255, 0.28); }
+}
+
+.job-card-bar {
+  position: relative; height: 6px; background: var(--line);
+  border-radius: 3px; overflow: hidden;
+  margin-top: 4px;
+}
+.job-card-bar-underlay {
+  position: absolute; inset: 0;
+  width: var(--total-pct, 0%);
+  background: rgba(109, 168, 255, 0.20);
+  transition: width 320ms cubic-bezier(.25,1,.5,1);
+}
+.job-card-bar-fill {
+  position: absolute; inset: 0;
+  width: var(--stage-pct, 0%);
+  background: var(--accent);
+  transition: width 220ms cubic-bezier(.25,1,.5,1);
+}
+.job-card[data-status="done"] .job-card-bar-fill,
+.job-card[data-status="done"] .job-card-bar-underlay {
+  background: #6fbf73; width: 100% !important;
+}
+.job-card[data-status="failed"] .job-card-bar-fill {
+  background: #c66; width: 100% !important;
+}
+.job-card[data-status="cancelled"] .job-card-bar-fill {
+  background: #d6c168;
+}
+
+.job-card-detail-toggle {
+  margin-top: 8px;
+  background: transparent; border: none;
+  color: var(--muted); font-size: 11px;
+  cursor: pointer; padding: 0;
+}
+.job-card-detail-toggle:hover { color: var(--ink-bright); }
+.job-card-detail-toggle::after { content: " ▾"; }
+.job-card-detail-toggle[aria-expanded="true"]::after { content: " ▴"; }
+.job-card-detail[hidden] { display: none; }
+.job-card-detail {
+  margin-top: 6px; padding-top: 6px;
+  border-top: 1px dashed var(--line);
+}
+.job-card-detail-rows {
+  display: grid; grid-template-columns: 1fr auto auto;
+  gap: 4px 12px; font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.job-card-detail-rows .stage-name { color: var(--muted); }
+.job-card-detail-rows .stage-active  { color: var(--ink-bright); }
+.job-card-detail-rows .stage-done    { color: #6fbf73; }
+.job-card-detail-rows .stage-pending { color: var(--muted); opacity: 0.55; }
+.job-card-detail-log {
+  margin-top: 6px;
+  font-family: var(--mono, ui-monospace, "Cascadia Mono", Menlo, monospace);
+  font-size: 10.5px; color: var(--muted);
+  max-height: 96px; overflow-y: auto;
+  padding: 4px 6px; border-radius: 4px;
+  background: rgba(0,0,0,0.18);
+  white-space: pre-wrap;
+}
+[data-theme="light"] .job-card-detail-log { background: rgba(0,0,0,0.05); }
+.job-card-error {
+  margin-top: 6px; padding: 6px 8px;
+  background: rgba(200,100,100,0.10); color: #c66;
+  border-radius: 4px;
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+/* ===== Upload-zone taxonomy-choice radios ============================ */
+.upload-taxonomy-choice {
+  display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.upload-taxonomy-choice .upload-taxonomy-label {
+  color: var(--ink-bright);
+  font-weight: 500;
+}
+.upload-taxonomy-choice label {
+  display: inline-flex; align-items: center; gap: 5px;
+  cursor: pointer;
+}
+.upload-taxonomy-choice input[type="radio"] {
+  margin: 0; accent-color: var(--accent);
+}
+
+/* ===== Manual-mode "unfiled" banner shown on the Taxonomy page after a
+   background ingest completes with taxonomy_mode=manual ================ */
+.tax-manual-banner {
+  display: flex; gap: 10px; align-items: center;
+  padding: 10px 14px; margin: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(232, 220, 196, 0.06);
+  font-size: 0.84rem; color: var(--ink-bright);
+}
+.tax-manual-banner-msg { flex: 1; min-width: 0; }
+.tax-manual-banner button {
+  background: var(--accent); color: #1a1a1a; border: none;
+  padding: 5px 10px; border-radius: 6px; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600;
+}
+.tax-manual-banner button:hover { filter: brightness(1.05); }
+.tax-manual-banner .tmb-close {
+  background: transparent; color: var(--muted);
+  padding: 0 4px; font-size: 16px;
+}
+.tax-manual-banner .tmb-close:hover { color: var(--ink-bright); }

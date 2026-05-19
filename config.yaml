@@ -217,3 +217,25 @@ compaction:
   keep_recent_turns: 6
   summary_target_tokens: 400
   mask_uncertain: false       # render [UNCERTAIN] tokens visibly in answers
+
+# Phase 8 — interactive retrieval review loop (all default OFF).
+# When review_enabled is false, no new events fire, no extra LLM calls are
+# made, and no DB writes happen — existing behaviour is byte-identical.
+interaction:
+  review_enabled: false               # master switch; flip true to enable the review loop
+  review_mode: smart_auto             # smart_auto | always | off
+                                      #   smart_auto -> trigger only when score is below
+                                      #                 review_score_floor or ambiguity is
+                                      #                 high (review_ambiguity_delta)
+                                      #   always     -> prompt the user after every retrieval
+                                      #   off        -> never prompt (same as review_enabled=false)
+  review_score_floor: -3.0            # rerank score below which smart_auto triggers a review
+  review_ambiguity_delta: 0.4         # score gap between top-2 results; below = ambiguous
+  review_branch_threshold: 2          # minimum number of plausible branches to trigger review
+  review_timeout_s: 300.0             # seconds to wait for user response before proceeding
+  rephrasings_enabled: true           # offer 3 alternative query phrasings (prompts/rephrase.md)
+  followups_enabled: true             # suggest 3 follow-up questions after answering (prompts/followups.md)
+  persistence_enabled: true           # store review decisions in messages.metadata (JSON)
+  why_source_enabled: true            # explain why each source was retrieved (prompts/why_source.md)
+  clarify_enabled: true               # ask one clarifying question when query is ambiguous (prompts/clarify.md)
+  expand_doc_enabled: true            # allow user to request full document expansion inline

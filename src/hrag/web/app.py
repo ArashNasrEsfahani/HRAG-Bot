@@ -32,7 +32,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
@@ -107,6 +107,7 @@ class ConfigPatch(BaseModel):
     adaptive_enabled: Optional[bool] = None
     adaptive_personal_episodic_bias: Optional[bool] = None
     adaptive_top_k: Optional[dict] = None  # intent → int; unknown keys are dropped
+    always_include_episodic: Optional[bool] = None
     # Phase 7-A live-mutable knobs
     math_meta_filter_enabled: Optional[bool] = None
     math_meta_rerank_threshold: Optional[float] = None
@@ -122,6 +123,51 @@ class ConfigPatch(BaseModel):
 
 class UserSwitch(BaseModel):
     user_id: str
+
+
+class ResumeRequest(BaseModel):
+    """Phase 8 — resume payload for ``POST /api/chat/turns/{turn_id}/resume``.
+
+    ``action`` enumerates every decision the review modal can submit. All
+    other fields are optional and only meaningful for specific actions:
+
+    * ``filter``    — ``selected_chunk_ids`` is the user-pinned subset.
+    * ``rephrase``  — ``rewritten_query`` is the substitute question.
+    * ``expand_doc``— ``expand_from_doc_id`` is the seed document.
+    * ``redescend`` — ``redirect_taxonomy_node_id`` is the node to climb back to.
+    * ``clarify``   — server emits a clarifying question; no extra fields.
+    * ``general`` / ``continue`` / ``abort`` — no extra fields.
+
+    ``include_episodic`` widens source_types for the re-retrieval pass.
+    ``remember_choice`` asks the orchestrator to persist the decision so
+    similar turns auto-resolve without prompting again.
+    """
+
+    action: Literal[
+        "continue",
+        "filter",
+        "rephrase",
+        "general",
+        "clarify",
+        "expand_doc",
+        "redescend",
+        "abort",
+    ] = "continue"
+    selected_chunk_ids: list[str] = []
+    rewritten_query: Optional[str] = None
+    expand_from_doc_id: Optional[str] = None
+    redirect_taxonomy_node_id: Optional[str] = None
+    include_episodic: bool = False
+    remember_choice: bool = False
+
+
+class WhySourceRequest(BaseModel):
+    """Phase 8 — payload for ``POST /api/chat/turns/{turn_id}/why_source``."""
+
+    question: str
+    title: str
+    section: Optional[str] = None
+    text: str
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +228,7 @@ def get_config() -> dict[str, Any]:
             "adaptive_personal_episodic_bias": cfg.retrieval.adaptive_personal_episodic_bias,
             "adaptive_top_k": cfg.retrieval.adaptive_top_k,
             "adaptive_retriever_per_intent": cfg.retrieval.adaptive_retriever_per_intent,
+            "always_include_episodic": cfg.retrieval.always_include_episodic,
             "math_meta_filter_enabled": cfg.retrieval.math_meta_filter_enabled,
             "math_meta_rerank_threshold": cfg.retrieval.math_meta_rerank_threshold,
         },
@@ -269,6 +316,8 @@ def patch_config(patch: ConfigPatch) -> dict[str, Any]:
         cfg.retrieval.adaptive_top_k = {
             k: int(v) for k, v in patch.adaptive_top_k.items() if k in allowed
         }
+    if patch.always_include_episodic is not None:
+        cfg.retrieval.always_include_episodic = patch.always_include_episodic
 
     # Phase 7-A knobs — read at chat() time, no rebuild needed.
     if patch.math_meta_filter_enabled is not None:
@@ -577,6 +626,18 @@ async def chat(req: ChatRequest):
             if event == "generate_token":
                 yield _sse_pack("token", payload)
                 continue
+            # Phase 8 — interactive review events surface as first-class SSE
+            # event types so the frontend can dispatch them without sniffing
+            # the inner ``event`` field of a generic ``progress`` packet.
+            if event == "review_required":
+                yield _sse_pack("review_required", payload)
+                continue
+            if event == "review_resolved":
+                yield _sse_pack("review_resolved", payload)
+                continue
+            if event == "followups":
+                yield _sse_pack("followups", payload)
+                continue
             # Everything else (retrieve_start, rerank_done, …) goes through
             # as a generic progress event.
             yield _sse_pack("progress", {"event": event, "payload": payload})
@@ -590,6 +651,81 @@ async def chat(req: ChatRequest):
             "X-Accel-Buffering": "no",  # disable proxy buffering
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — interactive review resume + per-source explanations
+# ---------------------------------------------------------------------------
+
+
+def _get_interaction_store():
+    """Return the orchestrator's :class:`InteractionStore`.
+
+    The store is created by the orchestrator when ``interaction.review_enabled``
+    is true; older orchestrators (or test doubles) may not expose the attribute.
+    In that case we lazily attach a fresh in-memory store so the endpoints
+    remain callable — they will return ``accepted=False`` for unknown turns,
+    which is the right semantic when the orchestrator never registered one.
+    """
+    orch = _get_orch()
+    store = getattr(orch, "interaction_store", None)
+    if store is None:
+        from hrag.interaction.store import InteractionStore  # noqa: PLC0415
+        store = InteractionStore()
+        # Best-effort: attach so subsequent calls share the same instance.
+        try:
+            orch.interaction_store = store
+        except Exception:
+            pass
+    return store
+
+
+@app.post("/api/chat/turns/{turn_id}/resume")
+def resume_turn(turn_id: str, req: ResumeRequest) -> dict[str, Any]:
+    """Submit the user's review decision and unblock the orchestrator thread.
+
+    Idempotent: a retried POST after the turn already resolved (or for an
+    unknown turn_id) returns ``200 {"accepted": False}`` rather than 404 so a
+    flaky network retry never crashes the frontend.
+    """
+    store = _get_interaction_store()
+    decision = req.model_dump()
+    accepted = store.submit_decision(turn_id, decision)
+    if not accepted:
+        return {
+            "accepted": False,
+            "turn_id": turn_id,
+            "reason": "turn_not_found_or_already_decided",
+        }
+    return {"accepted": True, "turn_id": turn_id}
+
+
+@app.post("/api/chat/turns/{turn_id}/why_source")
+def why_source(turn_id: str, req: WhySourceRequest) -> dict[str, Any]:
+    """Single-sentence explanation of why a passage is relevant to the question.
+
+    Lazy LLM call gated by ``cfg.interaction.why_source_enabled``. ``turn_id``
+    is accepted but currently unused — reserved for future per-turn rate
+    limiting and to keep the URL shape symmetric with ``/resume``.
+    """
+    del turn_id  # noqa: F841 — reserved for future per-turn rate limiting
+    orch = _get_orch()
+    cfg = _get_cfg()
+    if not cfg.interaction.why_source_enabled:
+        return {"explanation": ""}
+    try:
+        tpl_path = Path(__file__).resolve().parent.parent / "prompts" / "why_source.md"
+        tpl = tpl_path.read_text(encoding="utf-8")
+        prompt = tpl.format(
+            question=req.question,
+            title=req.title or "",
+            section=req.section or "",
+            text=(req.text or "")[:1500],
+        )
+        out = orch.llm.complete(prompt, temperature=0.2, max_tokens=80).strip()
+        return {"explanation": out}
+    except Exception as exc:  # noqa: BLE001
+        return {"explanation": "", "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -889,14 +1025,71 @@ class MemoryCreate(BaseModel):
     title: Optional[str] = None
 
 
-@app.post("/api/memories")
-def create_memory(body: MemoryCreate) -> dict[str, Any]:
+def _create_memory_sync(body: MemoryCreate) -> dict[str, Any]:
+    """Synchronous create-memory codepath.
+
+    Embeds + persists inline. Used by ``POST /api/memories`` when
+    ``background`` is false (CLI, tests, smoke benchmark) AND by the
+    background-job worker thread.
+    """
     orch = _get_orch()
     uid = _get_cfg().user.default_user_id
     if not body.text.strip():
         raise HTTPException(400, "memory text must be non-empty")
     new_id = orch.memory_store.add(uid, body.text, title=body.title)
     return {"memory_id": new_id}
+
+
+@app.post("/api/memories")
+def create_memory(body: MemoryCreate, background: bool = False) -> dict[str, Any]:
+    """Create an episodic memory.
+
+    Default (``background=false``) keeps the original synchronous shape so
+    every existing caller (CLI / tests / smoke benchmark) keeps working:
+    returns ``{"memory_id": "..."}`` once the embed has landed.
+
+    With ``background=true`` the embed runs in a daemon thread, the
+    endpoint returns immediately with ``{"job_id": ..., "background": true}``
+    and the caller polls ``GET /api/jobs/{job_id}`` for the final state.
+    """
+    if not body.text.strip():
+        raise HTTPException(400, "memory text must be non-empty")
+    if not background:
+        return _create_memory_sync(body)
+
+    cfg = _get_cfg()
+    uid = cfg.user.default_user_id
+    snippet = body.text.strip().replace("\n", " ")
+    if len(snippet) > 60:
+        snippet = snippet[:60] + "…"
+    job_id = _create_job(
+        uid, kind="memory_embed", total=1, message=f"queued: {snippet}"
+    )
+
+    def _worker() -> None:
+        try:
+            _update_job(
+                job_id, status="running", progress=0, total=1,
+                message=f"embedding: {snippet}",
+            )
+            result = _create_memory_sync(body)
+            _update_job(
+                job_id, status="done", progress=1, total=1,
+                message=f"saved: {snippet}",
+                result={"memory_id": result["memory_id"], "kind": "memory_embed"},
+                completed=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _update_job(
+                job_id, status="failed",
+                message=f"{type(exc).__name__}: {exc}",
+                completed=True,
+            )
+
+    threading.Thread(
+        target=_worker, daemon=True, name=f"memory-embed-{job_id[:8]}",
+    ).start()
+    return {"job_id": job_id, "background": True, "kind": "memory_embed"}
 
 
 # ---------------------------------------------------------------------------
@@ -1140,50 +1333,258 @@ def _update_job(
     orch.db.commit()
 
 
-def _run_ingest_job(job_id: str, uid: str, dest_path: Path, original_name: str) -> None:
-    """Worker thread: runs IngestPipeline.ingest_path and updates the job row."""
+_TAXONOMY_MODES = ("auto", "manual", "skip")
+
+
+# ---------------------------------------------------------------------------
+# Per-job cancellation registry + DB-write throttle for the SOTA progress UI.
+#
+# ``_cancel_events`` lets the cancel endpoint signal a running worker; the
+# pipeline's progress callback raises ``CancelledError`` on the next event so
+# the worker unwinds cleanly. ``_last_flush`` clamps DB writes to ≤5/sec per
+# job — every embed batch fires a progress event, but we don't want to write
+# the jobs row 30 times a second.
+# ---------------------------------------------------------------------------
+
+_cancel_events: dict[str, threading.Event] = {}
+_last_flush: dict[str, float] = {}
+_FLUSH_INTERVAL_S = 0.2
+
+
+def _flush_job_state(job_id: str, state: dict, *, force: bool = False) -> None:
+    """Throttled write of the per-job ``state`` blob into the jobs row."""
+    now = time.time()
+    last = _last_flush.get(job_id, 0.0)
+    if not force and (now - last) < _FLUSH_INTERVAL_S:
+        return
+    _last_flush[job_id] = now
+    files = state.get("files", []) or []
+    done_count = sum(1 for f in files if f.get("status") == "done")
+    total_files = len(files) or 1
+    current_stage = state.get("current_stage") or ""
+    _update_job(
+        job_id,
+        progress=done_count,
+        total=total_files,
+        message=current_stage or "running",
+        result=state,
+    )
+
+
+def _run_ingest_job(
+    job_id: str,
+    uid: str,
+    dest_path: Path,
+    original_name: str,
+    *,
+    taxonomy_mode: str = "auto",
+) -> None:
+    """Worker thread: runs IngestPipeline.ingest_path and updates the job row.
+
+    ``taxonomy_mode``:
+      * ``"auto"``   — current behaviour; DocAssigner auto-files at ingest.
+      * ``"manual"`` — skip the auto-assign hook; doc lands "unfiled" until
+                       the user drags it onto a node OR POSTs
+                       ``/api/taxonomy/auto-assign/{doc_id}``.
+      * ``"skip"``   — alias of ``"manual"`` (no auto-assign).
+    """
+    from hrag.ingest.pipeline import CancelledError as _CancelledError  # noqa: PLC0415
+
+    cancel_evt = _cancel_events.setdefault(job_id, threading.Event())
+    state: dict[str, Any] = {
+        "stages": {},
+        "current_stage": None,
+        "started_at": time.time(),
+        "files": [],
+        "errors": [],
+    }
+
+    file_entry: dict[str, Any] = {
+        "path": str(dest_path),
+        "name": original_name,
+        "status": "running",
+        "error": None,
+        "taxonomy_mode": taxonomy_mode,
+    }
+    state["files"].append(file_entry)
+
     try:
-        _update_job(job_id, status="running", message=f"ingesting {original_name}…")
+        _update_job(
+            job_id, status="running",
+            message=f"ingesting {original_name}…",
+            result=state,
+        )
         orch = _get_orch()
-        doc = orch.ingest.ingest_path(str(dest_path), uid)
+        skip_taxonomy = taxonomy_mode in ("manual", "skip")
+
+        def progress_cb(stage: str, payload: dict) -> None:
+            # Cancel check fires first — the next emit after the user clicks
+            # ✕ unwinds the pipeline.
+            if cancel_evt.is_set():
+                raise _CancelledError("ingest cancelled by user")
+            existing = state["stages"].get(stage) or {}
+            ts = payload.get("ts") or time.time()
+            ts_start = existing.get("ts_start", ts)
+            entry = {
+                **existing,
+                "stage": stage,
+                "message": payload.get("message", ""),
+                "n_done": payload.get("n_done", 0),
+                "n_total": payload.get("n_total", 1),
+                "last_ts": ts,
+                "ts_start": ts_start,
+            }
+            # Track per-stage end + duration
+            if entry["n_done"] >= entry["n_total"]:
+                entry["ts_end"] = ts
+                entry["duration_s"] = ts - ts_start
+            # Stage-specific extras pass through
+            for k in (
+                "n_chunks", "n_kept", "n_dropped", "dropped_breakdown",
+                "batch_index", "batch_size", "node_id", "node_label",
+                "bytes", "n_pages", "doc_id",
+            ):
+                if k in payload and payload[k] is not None:
+                    entry[k] = payload[k]
+            state["stages"][stage] = entry
+            state["current_stage"] = stage
+            # Pull stage-specific values into the file entry for surfacing
+            if stage == "load" and payload.get("bytes") is not None:
+                file_entry["bytes"] = payload["bytes"]
+            if stage == "chunk" and "n_chunks" in payload:
+                file_entry["n_chunks_raw"] = payload["n_chunks"]
+            if stage == "filter" and "n_kept" in payload:
+                file_entry["n_chunks"] = payload["n_kept"]
+            if stage == "assign":
+                if payload.get("node_id"):
+                    file_entry["assigned_node"] = payload["node_id"]
+            if stage == "done":
+                if "doc_id" in payload and payload["doc_id"]:
+                    file_entry["doc_id"] = payload["doc_id"]
+                if "n_chunks" in payload:
+                    file_entry["n_chunks"] = payload["n_chunks"]
+            _flush_job_state(job_id, state)
+
+        doc = orch.ingest.ingest_path(
+            str(dest_path),
+            uid,
+            skip_taxonomy=skip_taxonomy,
+            progress_cb=progress_cb,
+        )
         n_chunks = orch.db.execute(
             "SELECT COUNT(*) AS n FROM chunks WHERE doc_id = ? AND excluded = 0",
             (doc.doc_id,),
         ).fetchone()["n"]
+
+        # Surface the chosen taxonomy node (if any) so the frontend can show
+        # it. We look up the primary assignment row after ingest_path returns.
+        assigned_node: Optional[str] = None
+        if not skip_taxonomy:
+            row = orch.db.execute(
+                "SELECT node_id FROM kg_taxonomy_assignments "
+                "WHERE doc_id = ? AND user_id = ? AND is_primary = 1 LIMIT 1",
+                (doc.doc_id, uid),
+            ).fetchone()
+            if row is not None:
+                assigned_node = row["node_id"]
+
+        file_entry.update({
+            "doc_id": doc.doc_id,
+            "title": doc.title,
+            "source_path": str(dest_path),
+            "n_chunks": n_chunks,
+            "assigned_node": assigned_node,
+            "status": "done",
+        })
+        # Keep top-level keys for backwards-compat with the existing
+        # `taxonomy_mode == "manual"` post-completion handler.
+        state["doc_id"] = doc.doc_id
+        state["title"] = doc.title
+        state["source_path"] = str(dest_path)
+        state["n_chunks"] = n_chunks
+        state["taxonomy_mode"] = "manual" if skip_taxonomy else "auto"
+        state["assigned_node"] = assigned_node
+        state["kind"] = "doc_ingest"
+
         _update_job(
             job_id,
             status="done",
             progress=1, total=1,
             message=f"{n_chunks} chunks",
-            result={
-                "doc_id": doc.doc_id,
-                "title": doc.title,
-                "source_path": str(dest_path),
-                "n_chunks": n_chunks,
-            },
+            result=state,
+            completed=True,
+        )
+    except _CancelledError:
+        try: dest_path.unlink(missing_ok=True)
+        except Exception: pass
+        file_entry["status"] = "cancelled"
+        state["errors"].append({"file": original_name, "error": "cancelled"})
+        _update_job(
+            job_id,
+            status="cancelled",
+            message="cancelled by user",
+            result=state,
             completed=True,
         )
     except Exception as exc:  # noqa: BLE001
         try: dest_path.unlink(missing_ok=True)
         except Exception: pass
+        file_entry["status"] = "failed"
+        file_entry["error"] = f"{type(exc).__name__}: {exc}"
+        state["errors"].append({"file": original_name, "error": str(exc)})
         _update_job(
             job_id,
             status="failed",
             message=f"{type(exc).__name__}: {exc}",
+            result=state,
             completed=True,
         )
+    finally:
+        # Clean up the cancel event + flush timestamp so we don't leak memory
+        # across many ingests.
+        _cancel_events.pop(job_id, None)
+        _last_flush.pop(job_id, None)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict[str, Any]:
+    """Signal a running ingest worker to abort at the next progress event.
+
+    Returns ``{cancelled: bool, reason: str}``. The job row's status will
+    flip to ``"cancelled"`` shortly after the worker unwinds.
+    """
+    evt = _cancel_events.get(job_id)
+    if evt is None:
+        return {"cancelled": False, "reason": "not_running"}
+    evt.set()
+    return {"cancelled": True, "reason": "signaled"}
 
 
 @app.post("/api/ingest")
-async def ingest_upload(file: UploadFile = File(...), background: bool = True) -> dict[str, Any]:
+async def ingest_upload(
+    file: UploadFile = File(...),
+    background: bool = True,
+    taxonomy_mode: str = "auto",
+) -> dict[str, Any]:
     """Document ingest from a browser upload.
 
     When ``background=true`` (default) returns immediately with a ``job_id``;
     poll ``GET /api/jobs/{job_id}`` for progress. When ``background=false``
     blocks until done and returns the final summary directly.
+
+    ``taxonomy_mode``:
+      * ``"auto"``   — default; DocAssigner auto-files the doc at ingest.
+      * ``"manual"`` — skip auto-assign; doc lands unfiled, user picks a node.
+      * ``"skip"``   — alias of manual.
     """
     cfg = _get_cfg()
     uid = cfg.user.default_user_id
+
+    if taxonomy_mode not in _TAXONOMY_MODES:
+        raise HTTPException(
+            400,
+            f"taxonomy_mode must be one of {list(_TAXONOMY_MODES)}; got {taxonomy_mode!r}",
+        )
 
     name = (file.filename or "upload").strip()
     if not name:
@@ -1206,15 +1607,24 @@ async def ingest_upload(file: UploadFile = File(...), background: bool = True) -
         raise HTTPException(400, "empty file")
     dest.write_bytes(content)
 
-    job_id = _create_job(uid, kind="ingest", total=1, message=f"queued: {name}")
+    job_id = _create_job(uid, kind="doc_ingest", total=1, message=f"queued: {name}")
     if background:
         threading.Thread(
-            target=_run_ingest_job, args=(job_id, uid, dest, name), daemon=True
+            target=_run_ingest_job,
+            args=(job_id, uid, dest, name),
+            kwargs={"taxonomy_mode": taxonomy_mode},
+            daemon=True,
         ).start()
-        return {"job_id": job_id, "kind": "ingest", "status": "queued", "filename": name}
+        return {
+            "job_id": job_id,
+            "kind": "doc_ingest",
+            "status": "queued",
+            "filename": name,
+            "taxonomy_mode": taxonomy_mode,
+        }
 
     # Synchronous path — useful for the smoke benchmark.
-    _run_ingest_job(job_id, uid, dest, name)
+    _run_ingest_job(job_id, uid, dest, name, taxonomy_mode=taxonomy_mode)
     row = _get_job(job_id)
     if row["status"] == "failed":
         raise HTTPException(500, row["message"] or "ingest failed")
@@ -1693,6 +2103,42 @@ def taxonomy_move_doc(body: TaxonomyMoveDoc) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     print(f"[taxonomy] moved doc {body.doc_id} -> {body.node_id}", flush=True)
     return {"doc_id": body.doc_id, "node_id": body.node_id, "moved": True}
+
+
+@app.post("/api/taxonomy/auto-assign/{doc_id}")
+def taxonomy_auto_assign_doc(doc_id: str) -> dict[str, Any]:
+    """Synchronously run ``DocAssigner.assign`` for a single doc.
+
+    Used by the upload-flow "manual" mode: the user uploads a doc with
+    ``taxonomy_mode=manual``, sees it in the unfiled list, then clicks
+    "Auto-assign" if they don't want to drag it onto a node themselves.
+
+    Returns ``{"doc_id": ..., "assigned_node": "tx_..." or None}``.
+    """
+    _require_taxonomy_store()  # raises 503 when taxonomy is disabled
+    cfg = _get_cfg()
+    uid = cfg.user.default_user_id
+    # Confirm the doc exists for the active user before we run the LLM.
+    orch = _get_orch()
+    row = orch.db.execute(
+        "SELECT doc_id FROM documents WHERE doc_id = ? AND user_id = ?",
+        (doc_id, uid),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, f"doc {doc_id!r} not found for user {uid!r}")
+    assigner = _build_doc_assigner()
+    # DocAssigner.assign returns None when the tree is empty or the doc has
+    # no chunks. We surface that to the caller as ``assigned_node: null``.
+    try:
+        node_id = assigner.assign(uid, doc_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+    print(
+        f"[taxonomy] auto-assigned doc {doc_id} -> "
+        f"{node_id if node_id else '(none)'}",
+        flush=True,
+    )
+    return {"doc_id": doc_id, "assigned_node": node_id}
 
 
 @app.post("/api/taxonomy/clear")

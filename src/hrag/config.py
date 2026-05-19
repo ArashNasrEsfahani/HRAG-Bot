@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -197,6 +197,15 @@ class RetrievalConfig(BaseModel):
     # No-op when adaptive_enabled is False or the intent is not PERSONAL.
     adaptive_personal_episodic_bias: bool = True
 
+    # Phase 8.1 — memory recall fix.
+    # When True (default), episodic memories are included in retrieval for ALL
+    # intents, not just PERSONAL. Cosine similarity decides whether they
+    # appear in results; for PERSONAL turns the existing stable-sort still
+    # lifts them to the top. Set to False to revert to strict per-intent
+    # source_types (the pre-Phase-8.1 behaviour) — useful for users with
+    # massive corpora where memories should never compete with documents.
+    always_include_episodic: bool = True
+
     # Phase 7-A — math-meta query handling. Detect "formula"/"equation" meta-queries
     # and pass where={"has_math": True} into the retriever. Off by default — run
     # scripts/backfill_has_math.py first to populate metadata on existing chunks.
@@ -383,6 +392,28 @@ class FormulaExtractionConfig(BaseModel):
     max_tokens: int = 400
 
 
+class InteractionConfig(BaseModel):
+    """Phase 8 — interactive retrieval review loop.
+
+    Default-off. When `review_enabled` is False, no new events fire, no new
+    LLM calls are made, no DB writes happen. Existing 829 tests stay byte-
+    identical pass.
+    """
+
+    review_enabled: bool = False
+    review_mode: Literal["smart_auto", "always", "off"] = "smart_auto"
+    review_score_floor: float = -3.0
+    review_ambiguity_delta: float = 0.4
+    review_branch_threshold: int = 2
+    review_timeout_s: float = 300.0
+    rephrasings_enabled: bool = True
+    followups_enabled: bool = True
+    persistence_enabled: bool = True
+    why_source_enabled: bool = True
+    clarify_enabled: bool = True
+    expand_doc_enabled: bool = True
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
@@ -398,6 +429,7 @@ class Config(BaseModel):
     taxonomy: TaxonomyConfig = Field(default_factory=TaxonomyConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     formula_extraction: FormulaExtractionConfig = Field(default_factory=FormulaExtractionConfig)
+    interaction: InteractionConfig = Field(default_factory=InteractionConfig)
 
     project_root: Path = Field(default_factory=lambda: Path.cwd())
 

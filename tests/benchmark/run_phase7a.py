@@ -242,7 +242,7 @@ def _make_orch(tmp_dir: Path, *, math_meta=False, extract=False):
         orch.clue.llm = orch.llm
 
     class _FactualClassifier:
-        def classify(self, text):
+        def classify(self, text, **kwargs):
             return IntentVerdict(
                 intent=Intent.FACTUAL,
                 confidence=1.0,

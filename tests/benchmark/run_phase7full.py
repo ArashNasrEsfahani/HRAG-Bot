@@ -115,7 +115,7 @@ def q1_per_intent_retriever(tmp_dir: Path) -> tuple[bool | str, str]:
             yield "stub"
 
     class _FactualClassifier:
-        def classify(self, text):
+        def classify(self, text, **kwargs):
             return IntentVerdict(
                 intent=Intent.FACTUAL, confidence=1.0,
                 source="test", raw_label="factual",

@@ -109,7 +109,7 @@ class _ScriptedClassifier:
     def __init__(self, intent: Intent) -> None:
         self._intent = intent
 
-    def classify(self, text: str) -> IntentVerdict:
+    def classify(self, text: str, **kwargs) -> IntentVerdict:
         return IntentVerdict(
             intent=self._intent,
             confidence=1.0,

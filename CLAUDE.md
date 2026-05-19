@@ -159,7 +159,49 @@ Five parallel implementation agents shipped the deferred items in one wave, then
 23. `hrag.ingest.nougat_loader` import must remain side-effect-free: zero `nougat` / `nougat_ocr` modules pulled into `sys.modules` until a method is actually called. The Phase 6+7 wrap-up Q5 test verifies this property.
 24. `EmbeddingsConfig.suggested_models` is purely advisory metadata — the SentenceTransformersProvider still accepts any HF model id. Adding or removing entries from the list does not break existing configs.
 
+**Phase 8.1 — memory recall fix:**
+
+33. `cfg.retrieval.always_include_episodic = True` (the new default) means episodic
+    memories are included in retrieval for ALL intents, not only PERSONAL. The
+    PERSONAL stable-sort that lifts episodic to top is preserved on top of this.
+    Setting it to False reverts to strict per-intent source_types (the pre-Phase-8.1
+    behaviour) — useful for users with massive corpora where memories should never
+    compete with documents. Both the "full" and "episodic" branches in
+    `Orchestrator.chat()` honour the flag; the GET/POST `/api/config` endpoints
+    surface it under `retrieval.always_include_episodic`.
+
 **Deferred to Phase 8+ (still deferred, requires real usage / infra):** actually running Nougat over a corpus (scaffold present, model download is opt-in), actually swapping to a math-aware embedder + re-ingest (selector present, user controls when), feedback-loop fine-tuning (analytics now expose data, but training infra is a Phase 8 lift), cross-turn KV-cache reuse via Ollama prefix tokens (research-heavy beyond `num_keep`).
+
+**Phase 8 — Interactive retrieval review loop** — **complete**, 897 passing tests, 5/5 acceptance benchmark.
+
+Triggered by a user transcript: "I want to see the stars and the moon and all in between" — HRAG retrieved 6 off-corpus chunks (StarCoder/T5-Large/FAISS by lexical match on "stars"), reasoned across them, then politely reported "no information about the moon." The system paid for retrieval + reasoning + apology when the cheap signal (every rerank score deep in the negative) already proved the question was off-corpus. The user had no chance to redirect mid-turn.
+
+Phase 8 inserts a pause between retrieval and answer generation. The orchestrator emits a `review_required` SSE event with the candidate sources, the system's clue (hypothesis), the taxonomy descend trace, and 0-3 alternative phrasings; the frontend renders a modal; the user POSTs a decision to `/api/chat/turns/{id}/resume` which unblocks the orchestrator thread. All thirteen sub-features (A-M) ship in one phase, gated by one config block (`interaction.review_enabled`, default OFF).
+
+**Phase 8 modules:**
+- `src/hrag/interaction/store.py` — `InteractionStore` (in-memory dict of `PendingTurn` keyed by turn_id, daemon reaper thread with TTL = `cfg.interaction.review_timeout_s + 30s`, `submit_decision()` idempotent, `wait_for_decision(timeout)` blocks on `threading.Event`).
+- `src/hrag/interaction/review.py` — `should_pause()` evaluates 7 trigger heuristics (score_floor, ambiguity_delta, branch_threshold, intent_unclear, router_ambiguous, factual_general_swap, always_mode); `build_review_payload()` snapshots up to 240 chars per source; `generate_rephrasings()` runs one LLM pass against `prompts/rephrase.md`; `maybe_pause()` orchestrates the full flow with default-off short-circuit.
+- `src/hrag/config.py::InteractionConfig` — 13 fields (enabled, mode, score_floor=-3.0, ambiguity_delta=0.4, branch_threshold=2, timeout_s=300, rephrasings_enabled, followups_enabled, persistence_enabled, why_source_enabled, clarify_enabled, expand_doc_enabled).
+- `src/hrag/db/schema.sql` + `db/migrations.py` — new `messages.metadata TEXT` (JSON, nullable) column via idempotent ALTER TABLE migration.
+- `src/hrag/orchestrator.py` — `Orchestrator.__init__` owns a long-lived `InteractionStore`; `chat()` allocates `turn_id` on the `start` event and emits it; pause hook between `organize_done` and prompt rendering; action dispatcher handles `continue/filter/rephrase/general/clarify/expand_doc/redescend/abort` + episodic toggle; FACTUAL→GENERAL silent swap branch now gated on `review_decision.action == "continue"`; follow-ups generation between `generate` and `done`; decision metadata persisted to `messages.metadata` JSON.
+- `src/hrag/web/app.py` — `POST /api/chat/turns/{id}/resume` (pydantic `Literal` action validation, idempotent on `accepted=False`); `POST /api/chat/turns/{id}/why_source` (lazy per-source explanation, gated by `cfg.interaction.why_source_enabled`); SSE `_stream()` relays `review_required`, `review_resolved`, `followups` as dedicated event types.
+- `src/hrag/web/static/index.html` — `#review-modal-scrim` + `#review-modal` with reasons row, editable clue textarea, rephrasing chips, taxonomy breadcrumbs, per-source rows with checkbox + "Why this?" + "More like this", footer with `Continue / Ask me to clarify / Answer from general / Cancel`, keyboard-shortcut hint line.
+- `src/hrag/web/static/app.js` — `handleReviewRequired(payload)`, `submitReviewDecision(partial)` (auto-promotes `continue` to `filter` when sources are unchecked, to `general` when all unchecked, to `rephrase` when the clue was edited), `fetchWhySource()`, `renderFollowups()`, keyboard handler (`Enter` continue, `Esc` abort, `1-9` toggle source, `E` edit clue, `R` cycle rephrase chip, `G` general, `C` clarify).
+- `src/hrag/web/static/styles.css` — `.review-modal*` classes mirroring the Smart Remember modal Z-stack (scrim=80, modal=81). The critical `.review-modal[hidden] { display: none !important; }` guard prevents the modal leaking when `display: flex` would otherwise win.
+- `src/hrag/prompts/{rephrase,clarify,followups,why_source}.md` — 4 new prompt templates.
+
+**Phase 8 contracts (must survive Phase 9+):**
+
+25. `cfg.interaction.review_enabled = False` (the default) must be a true no-op: zero new SSE events, zero new LLM calls, zero new DB writes. The 829 pre-Phase-8 tests stay byte-identical pass.
+26. `InteractionStore` TTL cleanup must run on a daemon thread and never block the orchestrator. `store.shutdown()` is called from `Orchestrator.close()`; calling shutdown twice must not raise.
+27. The five public SSE event types from Phase 8 — `review_required`, `review_resolved`, `followups`, `review_warning`, plus `turn_id` riding on the existing `start` event — are part of the contract. Renaming any of them breaks the frontend.
+28. `POST /api/chat/turns/{id}/resume` MUST be idempotent on any action: a network retry returning `{"accepted": false, "reason": "turn_not_found_or_already_decided"}` is the correct shape; do not raise 4xx/5xx for the retry case.
+29. `messages.metadata` is JSON-encoded text; readers MUST tolerate `NULL` and malformed JSON without raising. The column stays optional — pre-Phase-8 reads (`r["content"]`, `r["role"]`) keep working.
+30. `should_pause()` must remain a pure function (no LLM, no DB, no progress callback). The orchestrator runs it on every FACTUAL turn when `review_enabled=true`; non-determinism here would make the pause behaviour untestable.
+31. The SSE relay must keep routing `review_required` / `review_resolved` / `followups` as DEDICATED SSE event types (i.e. `event: review_required`), not nested under `event: progress`. The frontend dispatcher reads the SSE event name directly for these.
+32. `orchestrator.chat()` MUST emit `turn_id` on the `start` event payload. Without it, the frontend cannot POST to `/api/chat/turns/{id}/resume`.
+
+**Deferred (not in Phase 8):** cross-session policy learning (`remember_choice=true` writes the policy to `messages.metadata` but Phase 8 doesn't read it back to pre-fill the modal — future phase indexes past decisions); streaming KV-cache pre-warm during the pause (cheap; ship if `click → first token` latency > 800 ms); mobile bottom-sheet variant of the modal (current centred dialog works at any width); voice / hands-free path; surfacing the `interaction` block in `GET /api/config` (currently env-var + config.yaml only). → All deferred to Phase 8.1+ or a future phase.
 
 ## Phase 4 / 5 must preserve
 

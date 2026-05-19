@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role        TEXT NOT NULL,                     -- 'system' | 'user' | 'assistant'
     content     TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    metadata    TEXT,                              -- Phase 8: JSON-encoded review decision (nullable)
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );

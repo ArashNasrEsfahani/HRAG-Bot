@@ -184,6 +184,70 @@ class TaxonomyRetriever(Retriever):
             where=where,
         )
 
+        # Phase 8.2: episodic memories are inherently "always relevant" on
+        # personal turns regardless of which taxonomy branch the query landed
+        # on. The leaf-doc allow-list correctly scopes documents (topic
+        # filter), but it WRONGLY culls memories filed under a different leaf
+        # than the one the query descended to. Re-scan the user's episodic
+        # chunks GLOBALLY (no doc_id filter) and merge into the result set;
+        # for documents, leaf-scoping still wins.
+        include_episodic_globally = (
+            source_types is None
+            or (
+                isinstance(source_types, (list, tuple))
+                and "episodic" in source_types
+            )
+        )
+        episodic_added = 0
+        if include_episodic_globally:
+            try:
+                episodic_pairs = self._vector_store.query(
+                    user_id=user_id,
+                    query_embedding=q_emb,
+                    top_k=top_k,
+                    source_types=["episodic"],
+                    doc_ids=None,
+                    where=where,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "TaxonomyRetriever: global episodic scan failed: %s", exc
+                )
+                episodic_pairs = []
+
+            if episodic_pairs:
+                # Merge: prefer higher score, dedupe by chunk_id, cap at top_k.
+                by_id: dict[str, float] = {cid: s for cid, s in pairs}
+                pre_count = len(by_id)
+                for cid, s in episodic_pairs:
+                    prev = by_id.get(cid)
+                    if prev is None or s > prev:
+                        by_id[cid] = s
+                merged = sorted(
+                    by_id.items(), key=lambda x: x[1], reverse=True
+                )[:top_k]
+                episodic_added = len(by_id) - pre_count
+                pairs = merged
+
+        # Surface what happened in the descend trace so the GUI's tree
+        # navigation panel can show "augmented with N global episodic
+        # memories" alongside the document path. Only mutate when we
+        # actually added something so the public payload stays minimal in
+        # the common case.
+        if episodic_added > 0:
+            try:
+                existing_note = getattr(self.last_descend, "note", None)
+                addendum = (
+                    f"augmented with {episodic_added} global episodic memories"
+                )
+                self.last_descend.note = (  # type: ignore[attr-defined]
+                    f"{existing_note}; {addendum}" if existing_note else addendum
+                )
+            except Exception:  # noqa: BLE001
+                # DescendResult may be a frozen dataclass on some paths; the
+                # note is purely advisory for the GUI, so silently skip.
+                pass
+
         if not pairs:
             return []
 
@@ -325,6 +389,15 @@ class TaxonomyRetriever(Retriever):
         }
         if self._tree_empty:
             out["note"] = "tree empty — fell back to vector"
+        # Phase 8.2: forward the dynamic note attribute set by the global
+        # episodic merge (e.g. "augmented with N global episodic memories")
+        # so the GUI tree-navigation panel can surface what augmented the
+        # leaf-doc scan. Falls back to the tree-empty note if both apply.
+        dyn_note = getattr(result, "note", None)
+        if dyn_note:
+            out["note"] = (
+                f"{out['note']}; {dyn_note}" if "note" in out else dyn_note
+            )
         return out
 
     def _fetch_doc_titles(self, doc_ids: list[str]) -> list[str]:

@@ -1,0 +1,2021 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HRAG-Bot — Capabilities</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Kareone palette — light theme on white */
+    --primary: #183661;         /* deep navy — main brand colour */
+    --secondary: #c7b299;       /* warm beige — accent */
+    --primary-soft: #2a4f87;
+    --primary-tint: rgba(24, 54, 97, 0.08);
+    --primary-tint-2: rgba(24, 54, 97, 0.16);
+    --secondary-tint: rgba(199, 178, 153, 0.20);
+    --secondary-tint-2: rgba(199, 178, 153, 0.45);
+
+    --bg: #ffffff;
+    --bg-2: #f7f8fb;
+    --bg-elev: #ffffff;
+    --bg-elev-2: #f3f5f9;
+    --ink: #1f2a3f;
+    --ink-bright: #0e1a31;
+    --muted: #6a7790;
+    --muted-2: #8a95ab;
+    --line: #e3e7ef;
+    --line-2: #d2d7e2;
+
+    /* Backwards-compatible names used throughout the stylesheet */
+    --accent: var(--primary);
+    --accent-2: var(--secondary);
+    --accent-cool: var(--primary-soft);
+    --good: #2f8c4f;
+    --warn: #b07f2a;
+    --danger: #b94a4a;
+    --shadow-1: 0 1px 2px rgba(24, 54, 97, 0.08);
+    --shadow-2: 0 8px 24px rgba(24, 54, 97, 0.10);
+    --shadow-3: 0 20px 56px rgba(24, 54, 97, 0.14);
+    --t-fast: 140ms;
+    --t-base: 220ms;
+    --t-slow: 360ms;
+    --ease: cubic-bezier(0.25, 1, 0.5, 1);
+    --font-en: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-fa: "Vazirmatn", "Iran Sans", "IRANYekan", "Tahoma", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100vh;
+    background:
+      radial-gradient(ellipse at 18% -10%, var(--secondary-tint) 0%, transparent 38%),
+      radial-gradient(ellipse at 88% 110%, var(--primary-tint) 0%, transparent 45%),
+      var(--bg);
+    color: var(--ink);
+    font-family: var(--font-en);
+    font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  html[lang="fa"], html[lang="fa"] body { font-family: var(--font-fa); }
+
+  /* ---------- Header ---------- */
+  header.topbar {
+    position: sticky; top: 0; z-index: 30;
+    height: 60px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 28px;
+    background: rgba(255, 255, 255, 0.88);
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+  }
+  .brand-mark {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-soft) 100%);
+    display: grid; place-items: center;
+    color: #fff; font-weight: 700; font-size: 14px;
+    box-shadow: var(--shadow-1);
+  }
+  .brand-name {
+    font-size: 15.5px; font-weight: 600; color: var(--ink-bright);
+    letter-spacing: 0.01em;
+  }
+  .brand-sub {
+    font-size: 11px; color: var(--muted); margin-top: 1px;
+  }
+  html[lang="fa"] .brand-name { font-weight: 700; }
+
+  /* Inline legend showing the bilingual presentation key */
+  .bi-legend {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--muted);
+    padding: 6px 12px; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--bg-elev);
+    box-shadow: var(--shadow-1);
+  }
+  .bi-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+  }
+  .bi-dot-en { background: var(--primary); }
+  .bi-dot-fa { background: var(--secondary); }
+  .bi-legend-en { font-family: var(--font-en); color: var(--ink); font-weight: 500; }
+  .bi-legend-fa { font-family: var(--font-fa); color: var(--ink); font-weight: 500; }
+  .bi-sep { color: var(--muted-2); margin: 0 2px; }
+
+  /* ---------- Main layout ---------- */
+  main.shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 500px;
+    gap: 0;
+    height: calc(100vh - 60px);
+  }
+  html[dir="rtl"] main.shell { grid-template-columns: 500px minmax(0, 1fr); }
+  @media (max-width: 1280px) {
+    main.shell { grid-template-columns: minmax(0, 1fr) 440px; }
+    html[dir="rtl"] main.shell { grid-template-columns: 440px minmax(0, 1fr); }
+  }
+
+  /* ---------- Flowchart pane ---------- */
+  .flow-pane {
+    position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse at 30% 20%, var(--secondary-tint) 0%, transparent 40%),
+      radial-gradient(ellipse at 75% 75%, var(--primary-tint) 0%, transparent 50%);
+  }
+  .flow-canvas {
+    width: 100%; height: 100%;
+    display: block;
+  }
+  .flow-canvas-wrap {
+    width: 100%; height: 100%;
+    padding: 24px 32px;
+    overflow: auto;
+  }
+  /* Hide scrollbars but keep scrollable */
+  .flow-canvas-wrap::-webkit-scrollbar { width: 0; height: 0; }
+
+  /* ---------- Capability cards ---------- */
+  .cap-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    width: 100%;
+    max-width: 980px;
+    margin: 12px auto;
+    padding-bottom: 80px;
+  }
+  /* Layer labels above each row — show EN + FA side by side with a divider */
+  .cap-layer-label {
+    grid-column: 1 / -1;
+    font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--muted-2);
+    padding: 12px 4px 4px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .cap-layer-label::before, .cap-layer-label::after {
+    content: ""; flex: 1; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line), transparent);
+  }
+  /* The two language spans inside a layer label render inline, side by side */
+  .cap-layer-label > [data-lang="en"],
+  .cap-layer-label > [data-lang="fa"] {
+    display: inline-block;
+  }
+  .cap-layer-label > [data-lang="en"] {
+    color: var(--primary);
+    letter-spacing: 0.18em; text-transform: uppercase;
+  }
+  .cap-layer-label > [data-lang="fa"] {
+    color: var(--secondary);
+    letter-spacing: 0; text-transform: none;
+    font-size: 12.5px; font-weight: 600;
+    margin-left: 8px;
+  }
+  .cap-layer-label > [data-lang="fa"]::before {
+    content: "·";
+    margin-right: 8px;
+    color: var(--muted-2);
+    letter-spacing: 0;
+  }
+
+  .cap {
+    position: relative;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 14px 12px;
+    cursor: pointer;
+    transition: transform var(--t-fast) var(--ease),
+                border-color var(--t-fast) var(--ease),
+                background var(--t-fast) var(--ease),
+                box-shadow var(--t-base) var(--ease);
+    min-height: 96px;
+    display: flex; flex-direction: column; gap: 6px;
+    overflow: hidden;
+    box-shadow: var(--shadow-1);
+  }
+  .cap::before {
+    content: "";
+    position: absolute; left: 0; right: 0; top: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--primary), var(--secondary), transparent);
+    opacity: 0;
+    transition: opacity var(--t-base) var(--ease);
+  }
+  .cap:hover {
+    transform: translateY(-2px);
+    border-color: var(--secondary);
+    background: var(--bg-elev);
+    box-shadow: var(--shadow-2);
+  }
+  .cap:hover::before { opacity: 0.8; }
+  .cap.active {
+    border-color: var(--primary);
+    background: var(--bg-elev);
+    box-shadow: 0 0 0 1px var(--primary-tint-2), var(--shadow-2);
+  }
+  .cap.active::before { opacity: 1; }
+
+  .cap-head {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .cap-icon {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    background: var(--secondary-tint);
+    display: grid; place-items: center;
+    color: var(--primary);
+    flex-shrink: 0;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  .cap:hover .cap-icon {
+    background: var(--secondary-tint-2);
+  }
+  .cap.active .cap-icon {
+    background: var(--primary);
+    color: #fff;
+  }
+  .cap-icon svg {
+    width: 18px; height: 18px;
+    stroke: currentColor; fill: none;
+    stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  }
+  /* --- Bilingual card title: EN on top in primary nav, FA below in Vazirmatn --- */
+  .cap-title {
+    display: flex; flex-direction: column; gap: 1px;
+    line-height: 1.2;
+    min-width: 0;
+  }
+  .cap-title [data-lang="en"] {
+    font-size: 13.5px; font-weight: 600;
+    color: var(--ink-bright);
+  }
+  .cap-title [data-lang="fa"] {
+    font-size: 12.5px; font-weight: 600;
+    color: var(--primary);
+    opacity: 0.78;
+    line-height: 1.45;
+  }
+
+  /* --- Bilingual blurb: stacked, with a faint divider between languages --- */
+  .cap-blurb {
+    display: flex; flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .cap-blurb [data-lang="en"] {
+    color: var(--muted);
+  }
+  .cap-blurb [data-lang="fa"] {
+    color: var(--ink);
+    font-size: 12px;
+    line-height: 1.7;
+    padding-top: 5px;
+    border-top: 1px dashed var(--line);
+    opacity: 0.92;
+  }
+
+  /* Pulsing dot on active node */
+  .cap-pulse {
+    position: absolute; top: 12px; right: 12px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--primary);
+    box-shadow: 0 0 0 0 var(--primary-tint-2);
+    animation: cap-pulse 1.8s ease-in-out infinite;
+    opacity: 0;
+    transition: opacity var(--t-base);
+  }
+  html[dir="rtl"] .cap-pulse { right: auto; left: 12px; }
+  .cap.active .cap-pulse { opacity: 1; }
+  @keyframes cap-pulse {
+    0%   { box-shadow: 0 0 0 0 var(--primary-tint-2); }
+    70%  { box-shadow: 0 0 0 10px rgba(24, 54, 97, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(24, 54, 97, 0); }
+  }
+
+  /* Connector arrows between layers */
+  .cap-arrows {
+    grid-column: 1 / -1;
+    position: relative;
+    height: 22px;
+    pointer-events: none;
+  }
+  .cap-arrows svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    overflow: visible;
+  }
+  .cap-arrow-line {
+    stroke: var(--line-2);
+    stroke-width: 1.4;
+    fill: none;
+    stroke-linecap: round;
+    stroke-dasharray: 4 4;
+    animation: dash 22s linear infinite;
+    opacity: 0.7;
+  }
+  @keyframes dash {
+    to { stroke-dashoffset: -200; }
+  }
+  .cap-arrow-tip {
+    fill: var(--secondary);
+    opacity: 0.85;
+  }
+
+  /* ---------- Side panel ---------- */
+  aside.panel {
+    background: var(--bg-2);
+    border-left: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    box-shadow: inset 1px 0 0 var(--line);
+  }
+  html[dir="rtl"] aside.panel { border-left: none; border-right: 1px solid var(--line); }
+  .panel-head {
+    padding: 22px 24px 16px;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+  /* Eyebrow: small layer label, EN + FA inline */
+  .panel-eyebrow {
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.16em; color: var(--primary);
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .panel-eyebrow .eb-en { font-family: var(--font-en); }
+  .panel-eyebrow .eb-fa {
+    font-family: var(--font-fa); font-size: 12px;
+    letter-spacing: 0; text-transform: none;
+    color: var(--secondary); font-weight: 600;
+  }
+  .panel-eyebrow .eb-fa::before { content: "·"; margin-right: 6px; color: var(--muted-2); }
+
+  /* Title: EN heading + Persian heading stacked */
+  .panel-title {
+    margin: 6px 0 0;
+    line-height: 1.2;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .panel-title .pt-en {
+    font-family: var(--font-en);
+    font-size: 22px; font-weight: 700; color: var(--ink-bright);
+    direction: ltr;
+  }
+  .panel-title .pt-fa {
+    font-family: var(--font-fa);
+    font-size: 20px; font-weight: 700; color: var(--primary);
+    direction: rtl; opacity: 0.85;
+  }
+
+  /* Subtitle: two stacked lines */
+  .panel-sub {
+    margin-top: 6px;
+    display: flex; flex-direction: column; gap: 2px;
+    line-height: 1.55;
+  }
+  .panel-sub .ps-en {
+    font-family: var(--font-en); font-size: 12.5px; color: var(--muted);
+    direction: ltr;
+  }
+  .panel-sub .ps-fa {
+    font-family: var(--font-fa); font-size: 13px; color: var(--ink); opacity: 0.85;
+    direction: rtl;
+  }
+
+  .panel-tabs {
+    display: flex; gap: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+    flex-shrink: 0;
+  }
+  .panel-tab {
+    background: transparent; border: none;
+    color: var(--muted);
+    font: inherit; font-size: 12.5px; font-weight: 500;
+    padding: 14px 18px 12px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color var(--t-fast), border-color var(--t-fast);
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    line-height: 1.15;
+  }
+  .panel-tab .tab-en { font-family: var(--font-en); font-size: 12.5px; }
+  .panel-tab .tab-fa { font-family: var(--font-fa); font-size: 11px; color: var(--muted-2); opacity: 0.9; }
+  .panel-tab.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+    font-weight: 600;
+  }
+  .panel-tab.active .tab-fa { color: var(--secondary); opacity: 1; }
+  .panel-tab:not(.active):hover { color: var(--ink); }
+
+  .panel-body {
+    overflow-y: auto;
+    padding: 22px 24px 32px;
+    flex: 1;
+  }
+  .panel-body::-webkit-scrollbar { width: 6px; }
+  .panel-body::-webkit-scrollbar-track { background: transparent; }
+  .panel-body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .panel-section { display: none; }
+  .panel-section.active { display: block; animation: section-in 280ms var(--ease); }
+  @keyframes section-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .panel-body h3 {
+    font-size: 14px; font-weight: 600;
+    color: var(--ink-bright);
+    margin: 22px 0 8px;
+    letter-spacing: 0.01em;
+  }
+  .panel-body h3:first-child { margin-top: 0; }
+  .panel-body p {
+    color: var(--ink); font-size: 13.5px; line-height: 1.7;
+    margin: 8px 0;
+  }
+  .panel-body ul {
+    padding-left: 18px; margin: 8px 0;
+    color: var(--ink); font-size: 13.5px; line-height: 1.7;
+  }
+
+  /* Bilingual blocks inside the panel body — EN block and FA block stacked
+     with a clear visual separator and per-language typography. */
+  .lang-block {
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    position: relative;
+  }
+  .lang-block-en {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--primary);
+    direction: ltr;
+  }
+  .lang-block-fa {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-right: 3px solid var(--secondary);
+    direction: rtl;
+  }
+  .lang-block-tag {
+    position: absolute; top: -1px; right: -1px;
+    padding: 2px 8px;
+    font-size: 9.5px; font-weight: 700;
+    border-radius: 0 8px 0 8px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+  }
+  .lang-block-en .lang-block-tag {
+    background: var(--primary); color: #fff;
+  }
+  .lang-block-fa .lang-block-tag {
+    background: var(--secondary); color: #fff;
+    right: auto; left: -1px;
+    border-radius: 8px 0 8px 0;
+    letter-spacing: 0; text-transform: none;
+    font-family: var(--font-fa);
+    font-size: 11px;
+  }
+  .lang-block-en * { font-family: var(--font-en); }
+  .lang-block-en code { font-family: var(--font-mono); }
+  .lang-block-fa * { font-family: var(--font-fa); }
+  .lang-block-fa code { font-family: var(--font-mono); }
+  .lang-block-fa p { font-size: 14.5px; line-height: 1.85; }
+  .lang-block-fa ul { padding-left: 0; padding-right: 18px; font-size: 14.5px; }
+  .lang-block-fa h3 { font-size: 15px; }
+  .panel-body li { margin: 4px 0; }
+  .panel-body code {
+    font-family: var(--font-mono); font-size: 12px;
+    background: var(--secondary-tint);
+    padding: 1px 6px; border-radius: 4px;
+    color: var(--primary);
+    border: 1px solid var(--secondary-tint-2);
+    direction: ltr; unicode-bidi: embed;
+  }
+  .panel-body strong { color: var(--primary); font-weight: 700; }
+  html[lang="fa"] .panel-body strong { font-weight: 700; }
+  .panel-body li::marker { color: var(--secondary); }
+
+  .panel-empty {
+    text-align: center;
+    padding: 80px 30px;
+    color: var(--muted-2);
+  }
+  .panel-empty-icon {
+    width: 56px; height: 56px;
+    margin: 0 auto 16px;
+    border-radius: 14px;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-1);
+    display: grid; place-items: center;
+    color: var(--primary);
+  }
+  .panel-empty-icon svg { width: 28px; height: 28px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+  .panel-empty h2 {
+    color: var(--ink);
+    margin: 0 0 6px;
+    display: flex; flex-direction: column; gap: 2px;
+    line-height: 1.25;
+  }
+  .panel-empty h2 [data-lang="en"] { font-size: 16px; font-weight: 600; color: var(--ink-bright); }
+  .panel-empty h2 [data-lang="fa"] { font-size: 14.5px; font-weight: 600; color: var(--primary); opacity: 0.85; }
+  .panel-empty p {
+    color: var(--muted);
+    margin: 0;
+    display: flex; flex-direction: column; gap: 4px;
+    line-height: 1.55;
+  }
+  .panel-empty p [data-lang="en"] { font-size: 12.5px; }
+  .panel-empty p [data-lang="fa"] { font-size: 13px; color: var(--ink); opacity: 0.75; }
+
+  /* ---------- Pill chips for tech section ---------- */
+  .chips {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin: 6px 0 16px;
+  }
+  .chip {
+    font-size: 10.5px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--primary-tint);
+    color: var(--primary);
+    border: 1px solid var(--primary-tint-2);
+    font-family: var(--font-mono);
+    direction: ltr; unicode-bidi: embed;
+    font-weight: 500;
+  }
+
+  /* Footer attribution */
+  footer.foot {
+    position: absolute; bottom: 14px; left: 24px; right: 24px;
+    display: flex; justify-content: space-between; align-items: center;
+    color: var(--muted-2); font-size: 10.5px;
+    pointer-events: none;
+    z-index: 5;
+  }
+  footer.foot a { color: var(--primary); text-decoration: none; pointer-events: auto; font-weight: 500; }
+  footer.foot a:hover { text-decoration: underline; }
+  html[lang="fa"] footer.foot { font-family: var(--font-fa); font-size: 11px; }
+
+  /* Bilingual presentation — both languages always visible.
+     EN spans render in Inter, FA spans in Vazirmatn. Each span is a block
+     so they stack cleanly. Cards/panel titles and bodies handle their own
+     spacing with classes; the base rules below apply to every data-lang span. */
+  [data-lang="en"], [data-lang="fa"] {
+    display: block;
+  }
+  [data-lang="en"] {
+    font-family: var(--font-en);
+    direction: ltr;
+    unicode-bidi: embed;
+  }
+  [data-lang="fa"] {
+    font-family: var(--font-fa);
+    direction: rtl;
+    unicode-bidi: embed;
+  }
+  /* Inline contexts (footer, brand subtitle): keep on one row with a gentle sep. */
+  .inline-bi > [data-lang="en"],
+  .inline-bi > [data-lang="fa"] {
+    display: inline;
+  }
+  .inline-bi > [data-lang="en"]::after {
+    content: " · ";
+    color: var(--muted-2);
+    margin: 0 4px;
+  }
+
+  /* Responsive ish — collapse to single column under 900 */
+  @media (max-width: 1000px) {
+    main.shell { grid-template-columns: 1fr; height: auto; }
+    html[dir="rtl"] main.shell { grid-template-columns: 1fr; }
+    aside.panel {
+      border-left: none; border-top: 1px solid var(--line);
+      height: 50vh; min-height: 320px;
+    }
+    html[dir="rtl"] aside.panel { border-right: none; border-top: 1px solid var(--line); }
+    html, body { overflow: auto; }
+    .cap-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 560px) {
+    .cap-grid { grid-template-columns: 1fr; }
+    header.topbar { padding: 0 14px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">H</div>
+    <div>
+      <div class="brand-name">HRAG-Bot</div>
+      <div class="brand-sub inline-bi">
+        <span data-lang="en">Capability map</span>
+        <span data-lang="fa">نقشهٔ قابلیت‌ها</span>
+      </div>
+    </div>
+  </div>
+  <div class="bi-legend">
+    <span class="bi-dot bi-dot-en"></span>
+    <span class="bi-legend-text bi-legend-en">English</span>
+    <span class="bi-sep">/</span>
+    <span class="bi-dot bi-dot-fa"></span>
+    <span class="bi-legend-text bi-legend-fa">فارسی</span>
+  </div>
+</header>
+
+<main class="shell">
+
+  <!-- LEFT: flow grid (layered capability map) -->
+  <section class="flow-pane">
+    <div class="flow-canvas-wrap" id="flow-canvas-wrap">
+      <div class="cap-grid" id="cap-grid">
+
+        <!-- LAYER 1 — Input -->
+        <div class="cap-layer-label">
+          <span data-lang="en">Input</span>
+          <span data-lang="fa">ورودی</span>
+        </div>
+
+        <div class="cap" data-id="ingest" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Multi-format ingest</span>
+                <span data-lang="fa">دریافت چند قالبی</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">PDF, DOCX, Markdown, plain text — chunked, filtered, embedded in the background with a live progress card.</span>
+            <span data-lang="fa">PDF، DOCX، مارک‌داون و متن ساده — در پس‌زمینه قطعه‌بندی، فیلتر و بُردارسازی می‌شود و پیشرفت زنده نمایش داده می‌شود.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="memory" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M9 11c0-1.7 1.3-3 3-3s3 1.3 3 3-1.3 3-3 3"/><circle cx="12" cy="14" r="0.9" fill="currentColor"/><path d="M5 12a7 7 0 1014 0 7 7 0 00-14 0"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Episodic memory</span>
+                <span data-lang="fa">حافظهٔ تجربه‌محور</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Save quick facts about yourself or the people you talk about; the bot recalls them on every relevant turn.</span>
+            <span data-lang="fa">واقعیت‌های کوتاه دربارهٔ خود یا افراد را ذخیره می‌کنید؛ ربات در هر نوبت مرتبط آن‌ها را به‌یاد می‌آورد.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="profile" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">User profile</span>
+                <span data-lang="fa">پروفایل کاربر</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Persistent preferences and identity facts that ride along with every prompt for a personal tone.</span>
+            <span data-lang="fa">ترجیحات پایدار و اطلاعات هویتی که با هر درخواست همراه می‌شوند تا لحنی شخصی ایجاد شود.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="upload-choice" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M3 12h7M14 12h7M9 6l-6 6 6 6M15 6l6 6-6 6"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Auto vs manual filing</span>
+                <span data-lang="fa">خودکار یا دستی</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">On upload, choose to auto-file new docs in the category tree, or drop them onto a node yourself.</span>
+            <span data-lang="fa">هنگام بارگذاری، انتخاب می‌کنید سند جدید را خودکار در درخت دسته‌بندی قرار دهد یا خودتان روی گره بکشید.</span>
+          </div>
+        </div>
+
+        <div class="cap-arrows" data-arrow-row="1"></div>
+
+        <!-- LAYER 2 — Organize -->
+        <div class="cap-layer-label">
+          <span data-lang="en">Organize</span>
+          <span data-lang="fa">سازماندهی</span>
+        </div>
+
+        <div class="cap" data-id="taxonomy" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="6" cy="14" r="2"/><circle cx="12" cy="14" r="2"/><circle cx="18" cy="14" r="2"/><path d="M12 7v5M12 7l-6 7M12 7l6 7"/><circle cx="6" cy="20" r="1.5"/><circle cx="12" cy="20" r="1.5"/><path d="M6 16v2.5M12 16v2.5"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Hierarchical taxonomy</span>
+                <span data-lang="fa">دسته‌بندی سلسله‌مراتبی</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">An LLM-proposed, you-editable tree organizes your library into nested topics. Drag, rename, reshape.</span>
+            <span data-lang="fa">درختی پیشنهادشده توسط LLM و قابل‌ویرایش توسط شما، کتابخانه را در موضوعات تو در تو سامان می‌دهد. بکشید، تغییر نام دهید، شکل دهید.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="kg" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="12" cy="12" r="2"/><path d="M8 6h2M16 6h-2M8 18h2M16 18h-2M6 8v2M18 8v2M6 16v-2M18 16v-2M10 11l1-1M14 11l-1-1M10 13l1 1M14 13l-1 1"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Knowledge graph</span>
+                <span data-lang="fa">گراف دانش</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Entities and relationships extracted from your documents, merged across synonyms, and traversed by Personalized PageRank.</span>
+            <span data-lang="fa">موجودیت‌ها و روابط از اسناد استخراج، با مترادف‌ها ادغام، و با PageRank شخصی‌شده پیمایش می‌شوند.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="communities" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><circle cx="7" cy="9" r="3"/><circle cx="17" cy="9" r="3"/><circle cx="12" cy="17" r="3"/><path d="M9.5 11.5L12 14M14.5 11.5L12 14M7 6V4M17 6V4M12 20v2"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Community summaries</span>
+                <span data-lang="fa">خلاصه‌های جامعه</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Leiden communities of related concepts get pre-summarized so questions about big themes don't drown in passage-level detail.</span>
+            <span data-lang="fa">جوامع لایدن از مفاهیم مرتبط از پیش خلاصه می‌شوند تا پرسش‌های دربارهٔ مضمون‌های بزرگ در جزئیات قطعه‌ها غرق نشود.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="math" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M5 6h14M5 6l5 6-5 6M14 18h5M14 18l-2-4"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Math-aware ingest</span>
+                <span data-lang="fa">پردازش آگاه از فرمول</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Detects formulas — LaTeX or Unicode glyphs — flags chunks, boosts them on math-meta queries, then verbatim-extracts equations.</span>
+            <span data-lang="fa">فرمول‌ها — لاتک یا نمادهای یونیکد — را شناسایی می‌کند، قطعه‌ها را برچسب می‌زند، در پرس‌وجوهای ریاضی تقویت می‌کند و معادله‌ها را عینی استخراج می‌کند.</span>
+          </div>
+        </div>
+
+        <div class="cap-arrows" data-arrow-row="2"></div>
+
+        <!-- LAYER 3 — Retrieval -->
+        <div class="cap-layer-label">
+          <span data-lang="en">Retrieve</span>
+          <span data-lang="fa">بازیابی</span>
+        </div>
+
+        <div class="cap" data-id="multi-retriever" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M21 21l-5-5M11 7v8M7 11h8"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Multi-retriever fusion</span>
+                <span data-lang="fa">ترکیب چند بازیاب</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Dense vectors, BM25 sparse, KG-PPR, community summaries, and the taxonomy tree all running in concert.</span>
+            <span data-lang="fa">بُردارهای متراکم، BM25 پراکنده، PPR گرافی، خلاصه‌های جامعه و درخت دسته‌بندی همگی هم‌زمان به‌کار می‌روند.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="adaptive" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M4 17l4-7 5 4 7-9"/><path d="M14 5h6v6" /></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Adaptive per intent</span>
+                <span data-lang="fa">سازگار با هدف کاربر</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Greeting? Skip retrieval. Personal? Lift memories. Factual? Cast a wider net. The system tunes itself per turn.</span>
+            <span data-lang="fa">سلام؟ بازیابی نکن. شخصی؟ خاطره‌ها را بالا بیاور. واقعی؟ شبکهٔ پهن‌تر بینداز. سیستم خود را در هر نوبت تنظیم می‌کند.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="rerank" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M3 6h14M3 12h10M3 18h6"/><path d="M20 4v16M16 8l4-4 4 4"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Rerank &amp; organize</span>
+                <span data-lang="fa">رتبه‌بندی و سامان‌دهی</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Cross-encoder rerank, then KG2RAG tree-organize to remove redundancy and order quotes the way a writer would.</span>
+            <span data-lang="fa">رتبه‌بندی مجدد با cross-encoder و سپس سامان‌دهی درختی KG2RAG برای حذف تکرار و چینش نقل‌قول‌ها مانند نویسنده.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="gate" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M6 4v16M18 4v16M6 8h12M6 16h12"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Smart skip gate</span>
+                <span data-lang="fa">دروازهٔ هوشمند</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">RAGate decides whether a question even needs retrieval — small-talk skips the whole pipeline.</span>
+            <span data-lang="fa">RAGate تصمیم می‌گیرد آیا پرسش اصلاً نیاز به بازیابی دارد — گفت‌وگوی ساده کل خط لوله را رد می‌کند.</span>
+          </div>
+        </div>
+
+        <div class="cap-arrows" data-arrow-row="3"></div>
+
+        <!-- LAYER 4 — Reason & answer -->
+        <div class="cap-layer-label">
+          <span data-lang="en">Reason</span>
+          <span data-lang="fa">استدلال</span>
+        </div>
+
+        <div class="cap" data-id="raft" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M16 4v3h3M8 12h8M8 16h6"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Verbatim reasoning</span>
+                <span data-lang="fa">استدلال با نقل عین</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">RAFT-style prompts make the model quote source passages verbatim before drawing conclusions.</span>
+            <span data-lang="fa">پرامپت‌های RAFT مدل را وادار می‌کنند پیش از نتیجه‌گیری، عین قطعه‌های منبع را نقل کند.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="uncertain" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5c0-1.4 1.1-2.5 2.5-2.5s2.5 1.1 2.5 2.5c0 2.5-2.5 2.5-2.5 5"/><circle cx="12" cy="17" r="1" fill="currentColor"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Uncertainty marking</span>
+                <span data-lang="fa">نشانه‌گذاری تردید</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">When the model can't back a claim with a quote it self-marks it as uncertain — you see the doubt directly.</span>
+            <span data-lang="fa">وقتی مدل نمی‌تواند ادعا را با نقل پشتیبانی کند، خودش آن را نامطمئن علامت می‌زند — تردید را مستقیماً می‌بینید.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="clue" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M9 21h6M10 17a5 5 0 1 1 4 0v2h-4z"/><path d="M12 7v3"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Clue generation</span>
+                <span data-lang="fa">تولید سرنخ</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Generates a hypothesis of what you're asking before searching, lifting recall for ambiguous queries.</span>
+            <span data-lang="fa">پیش از جست‌وجو، فرضیه‌ای از پرسش شما می‌سازد تا بازخوانی برای پرس‌وجوهای مبهم بهبود یابد.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="formula" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M7 10l4 8M11 10l-4 8"/><path d="M14 10l3 4M17 10l-3 4M14 14l3 4"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Formula extraction</span>
+                <span data-lang="fa">استخراج فرمول</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">After the main answer, a second pass lifts every equation verbatim from the cited passages.</span>
+            <span data-lang="fa">پس از پاسخ اصلی، گذر دوم هر معادله را عیناً از قطعه‌های ذکرشده استخراج می‌کند.</span>
+          </div>
+        </div>
+
+        <div class="cap-arrows" data-arrow-row="4"></div>
+
+        <!-- LAYER 5 — Interact & output -->
+        <div class="cap-layer-label">
+          <span data-lang="en">Interact</span>
+          <span data-lang="fa">تعامل</span>
+        </div>
+
+        <div class="cap" data-id="review" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/><path d="M9 10l2 2 4-4"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Inline review pause</span>
+                <span data-lang="fa">مکث بازبینی درون چت</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">On low-confidence turns the bot pauses, shows you what it found, and asks how to proceed — right in the chat thread.</span>
+            <span data-lang="fa">در نوبت‌های کم‌اطمینان، ربات مکث می‌کند، یافته‌ها را نشان می‌دهد و می‌پرسد چگونه پیش رود — درست در رشتهٔ چت.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="stream" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M3 12c2-4 5-4 7 0s5 4 7 0 4-0 4 0"/><path d="M17 6h4M19 4v4"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Live markdown stream</span>
+                <span data-lang="fa">جریان زندهٔ مارک‌داون</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Bold, code, lists, headings render as the LLM streams them — like ChatGPT — not buffered to the end.</span>
+            <span data-lang="fa">پررنگ، کد، فهرست و عنوان همراه با خروجی LLM رندر می‌شوند — مانند ChatGPT — نه در پایان.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="bilingual" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M3 5h18"/><path d="M12 3v3M5 19l5-12 5 12M7 15h6"/><path d="M14 17h7M14 12c2 5 5 5 7 0"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Bilingual mirror</span>
+                <span data-lang="fa">آینهٔ دوزبانه</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Mixed Farsi + English in one paragraph renders correctly; the bot replies in whichever script you used.</span>
+            <span data-lang="fa">فارسی و انگلیسی آمیخته در یک پاراگراف درست رندر می‌شود؛ ربات با همان خطی که نوشتید پاسخ می‌دهد.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="followups" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M5 8h14v8a3 3 0 01-3 3H9l-4 3z"/><path d="M9 12h6M9 15h4"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Smart follow-ups</span>
+                <span data-lang="fa">پی‌گیری‌های هوشمند</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">After each answer, three clickable prompts suggest where the conversation could go next.</span>
+            <span data-lang="fa">پس از هر پاسخ، سه پرامپت کلیک‌پذیر مسیر بعدی گفت‌وگو را پیشنهاد می‌کنند.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="feedback" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><path d="M7 11v8H4V11zM7 11l4-7c1 0 2 .5 2 2v3h4l-2 9H7"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Feedback loop</span>
+                <span data-lang="fa">حلقهٔ بازخورد</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">👍 / 👎 on every answer feeds a JSONL export for downstream fine-tuning and an analytics drawer.</span>
+            <span data-lang="fa">بازخورد مثبت/منفی روی هر پاسخ به فایل JSONL برای ریزتنظیم بعدی و کشوی تحلیلی منتهی می‌شود.</span>
+          </div>
+        </div>
+
+        <div class="cap" data-id="local" tabindex="0">
+          <span class="cap-pulse"></span>
+          <div class="cap-head">
+            <span class="cap-icon">
+              <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M9 21h6M12 17v4"/><circle cx="6.5" cy="11" r="0.8" fill="currentColor"/><circle cx="8.5" cy="11" r="0.8" fill="currentColor"/></svg>
+            </span>
+            <div>
+              <div class="cap-title">
+                <span data-lang="en">Runs locally</span>
+                <span data-lang="fa">اجرای کاملاً محلی</span>
+              </div>
+            </div>
+          </div>
+          <div class="cap-blurb">
+            <span data-lang="en">Ollama for the LLM, sentence-transformers for embeddings, SQLite + ChromaDB for storage. Nothing leaves your machine.</span>
+            <span data-lang="fa">Ollama برای LLM، sentence-transformers برای embedding، SQLite و ChromaDB برای ذخیره. هیچ چیز از دستگاهتان خارج نمی‌شود.</span>
+          </div>
+        </div>
+
+      </div><!-- /cap-grid -->
+    </div><!-- /flow-canvas-wrap -->
+    <footer class="foot">
+      <div class="inline-bi">
+        <span data-lang="en">HRAG-Bot · hierarchical RAG with personalization</span>
+        <span data-lang="fa">HRAG-Bot · RAG سلسله‌مراتبی با شخصی‌سازی</span>
+      </div>
+      <div>
+        <a class="inline-bi" href="http://127.0.0.1:8000" target="_blank" rel="noopener">
+          <span data-lang="en">Open the app →</span>
+          <span data-lang="fa">باز کردن برنامه</span>
+        </a>
+      </div>
+    </footer>
+  </section>
+
+  <!-- RIGHT: detail panel -->
+  <aside class="panel" id="panel" aria-live="polite">
+    <div class="panel-head" id="panel-head">
+      <div class="panel-empty" id="panel-empty">
+        <div class="panel-empty-icon">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M21 21l-5-5"/></svg>
+        </div>
+        <h2>
+          <span data-lang="en">Pick a capability</span>
+          <span data-lang="fa">یک قابلیت را انتخاب کنید</span>
+        </h2>
+        <p>
+          <span data-lang="en">Click any card on the left to see how it works — in technical terms and in plain language.</span>
+          <span data-lang="fa">روی هر کارت در سمت چپ کلیک کنید تا ببینید چگونه کار می‌کند — به زبان فنی و به زبان ساده.</span>
+        </p>
+      </div>
+      <div id="panel-real" hidden>
+        <div class="panel-eyebrow" id="panel-eyebrow"></div>
+        <div class="panel-title" id="panel-title"></div>
+        <div class="panel-sub" id="panel-sub"></div>
+      </div>
+    </div>
+    <div class="panel-tabs" id="panel-tabs" hidden>
+      <button type="button" class="panel-tab active" data-tab="natural">
+        <span class="tab-en">In plain language</span>
+        <span class="tab-fa">به زبان ساده</span>
+      </button>
+      <button type="button" class="panel-tab" data-tab="technical">
+        <span class="tab-en">Technical</span>
+        <span class="tab-fa">فنی</span>
+      </button>
+    </div>
+    <div class="panel-body" id="panel-body">
+      <!-- filled by JS when a cap is clicked -->
+    </div>
+  </aside>
+
+</main>
+
+<script>
+  // ---------------------------------------------------------------------------
+  // Content map. Each entry is keyed by data-id on the .cap card.
+  // Two natural-language sentences plus a technical block with chips.
+  // ---------------------------------------------------------------------------
+  const CONTENT = {
+    "ingest": {
+      en: {
+        title: "Multi-format ingest",
+        eyebrow: "Input",
+        sub: "Bring documents into the system without thinking about format or block size.",
+        natural: `<p>Drop a stack of papers, manuals, or notes onto the upload zone. The system reads each file, breaks it into bite-sized pieces, throws away the ones that look like garbage (page numbers, footers, tables of contents), and saves the rest so it can find them later.</p><p>You don't sit and wait — the work happens in the background. A small card in the corner shows exactly which stage each file is in, how fast chunks are being processed, and how long is left.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">PyMuPDF</span><span class="chip">python-docx</span><span class="chip">markdown-it-py</span><span class="chip">tiktoken</span><span class="chip">sentence-transformers</span><span class="chip">SQLite + Chroma</span>
+          </div>
+          <h3>Pipeline stages</h3>
+          <ul>
+            <li><strong>Load</strong> — file → text via format-specific loaders.</li>
+            <li><strong>Chunk</strong> — token-budgeted, structure-aware (HeteRAG metadata fusion: title/section prepended to <code>embedding_text</code> only).</li>
+            <li><strong>Filter</strong> — pure-function quality drops (page numbers, headers, OCR artefacts) before any vector cost.</li>
+            <li><strong>Embed</strong> — batched (size 32) sentence-transformer calls; progress emitted per batch.</li>
+            <li><strong>Index</strong> — atomic <code>delete_doc</code> + <code>add_chunks</code> for idempotent re-ingest.</li>
+            <li><strong>Assign</strong> — DocAssigner places under the taxonomy tree (skippable for manual filing).</li>
+          </ul>
+          <h3>Progress surface</h3>
+          <p>A six-stage card with stage chips, live throughput (chunks/sec), ETA, cancel button, and an expandable per-stage duration table. Updates poll at 250 ms with a 200 ms server-side flush throttle.</p>`
+      },
+      fa: {
+        title: "دریافت چند قالبی",
+        eyebrow: "ورودی",
+        sub: "بدون فکر کردن به قالب یا اندازهٔ بلوک، اسناد را وارد سیستم کنید.",
+        natural: `<p>یک دسته مقاله، راهنما یا یادداشت را روی منطقهٔ بارگذاری بکشید. سیستم هر فایل را می‌خواند، به قطعه‌های کوچک می‌شکند، چیزهای بی‌مصرف (شمارهٔ صفحه، سرفصل، فهرست محتوا) را دور می‌اندازد و باقی را ذخیره می‌کند تا بعداً بیابد.</p><p>منتظر نمی‌نشینید — کار در پس‌زمینه انجام می‌شود. یک کارت کوچک در گوشه دقیقاً نشان می‌دهد هر فایل در چه مرحله‌ای است، چقدر سریع پردازش می‌شود و چقدر زمان مانده است.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">PyMuPDF</span><span class="chip">python-docx</span><span class="chip">markdown-it-py</span><span class="chip">tiktoken</span><span class="chip">sentence-transformers</span><span class="chip">SQLite + Chroma</span>
+          </div>
+          <h3>مراحل خط لوله</h3>
+          <ul>
+            <li><strong>Load</strong> — فایل به متن از طریق loader مخصوص قالب.</li>
+            <li><strong>Chunk</strong> — تکه‌بندی بر اساس بودجهٔ توکن و آگاه از ساختار (ادغام متادیتای HeteRAG: عنوان/بخش فقط به <code>embedding_text</code> الحاق می‌شود).</li>
+            <li><strong>Filter</strong> — حذف کیفی توابع خالص (شمارهٔ صفحه، سرفصل، خرابی OCR) پیش از هر هزینهٔ برداری.</li>
+            <li><strong>Embed</strong> — فراخوانی دسته‌ای (اندازهٔ ۳۲) sentence-transformer؛ پیشرفت در هر دسته منتشر می‌شود.</li>
+            <li><strong>Index</strong> — <code>delete_doc</code> + <code>add_chunks</code> اتمیک برای ورود مجدد ایدمپوتنت.</li>
+            <li><strong>Assign</strong> — DocAssigner سند را زیر درخت دسته‌بندی قرار می‌دهد (در حالت دستی قابل صرف‌نظر).</li>
+          </ul>
+          <h3>نمایش پیشرفت</h3>
+          <p>کارت شش‌مرحله‌ای با چیپ‌های مرحله، توان عبور زنده (قطعه در ثانیه)، تخمین زمان باقی، دکمهٔ لغو و جدول قابل بسط مدت هر مرحله. به‌روزرسانی هر ۲۵۰ میلی‌ثانیه با محدود‌سازی ۲۰۰ میلی‌ثانیه‌ای سمت سرور.</p>`
+      }
+    },
+    "memory": {
+      en: {
+        title: "Episodic memory",
+        eyebrow: "Input",
+        sub: "Small, durable facts the bot can use anywhere in conversation.",
+        natural: `<p>Tell the bot something worth remembering — your name, a friend's role, a preference, a one-liner from a meeting. Each fact is stored, embedded, and woven into retrieval so it surfaces whenever it's relevant, not only on the turn you saved it.</p><p>You can edit or delete a memory anytime from the sidebar. The bot doesn't pretend not to know what you've told it.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">EpisodicMemoryStore</span><span class="chip">source_type='episodic'</span><span class="chip">background job</span>
+          </div>
+          <h3>How it lives in the index</h3>
+          <p>Each memory becomes a <code>document</code> row with <code>source_type='episodic'</code> and a single chunk under it. Embeddings go into ChromaDB alongside document chunks; the orchestrator's retrieval call broadens <code>source_types</code> to always include episodic (<code>retrieval.always_include_episodic = true</code> by default).</p>
+          <h3>Recall path</h3>
+          <ul>
+            <li>The <strong>TaxonomyRetriever</strong> augments its leaf-doc scan with a second unscoped query over all episodic chunks, so memories filed under any node still surface for any question.</li>
+            <li>On PERSONAL intent with a strong episodic hit, the bot routes to a memory-led answer template that leads with the fact and offers to dig further in the documents.</li>
+          </ul>
+          <h3>Async embed</h3>
+          <p><code>POST /api/memories?background=true</code> returns a job_id immediately. A daemon thread embeds the text and writes the chunk; the progress card shows the work without blocking the chat.</p>`
+      },
+      fa: {
+        title: "حافظهٔ تجربه‌محور",
+        eyebrow: "ورودی",
+        sub: "حقایق کوچک و پایدار که ربات هر کجای گفت‌وگو می‌تواند به‌کار گیرد.",
+        natural: `<p>چیزی شایان به‌خاطرسپاری به ربات بگویید — نام خود، نقش یک دوست، یک ترجیح، یک خط از جلسه. هر حقیقت ذخیره، بُردارسازی و در بازیابی بافته می‌شود تا هر بار مرتبط بود، نه فقط در نوبتی که ذخیره کردید، ظاهر شود.</p><p>هر زمان از نوار کناری می‌توانید حافظه را ویرایش یا حذف کنید. ربات وانمود نمی‌کند آنچه گفته‌اید را نمی‌داند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">EpisodicMemoryStore</span><span class="chip">source_type='episodic'</span><span class="chip">job پس‌زمینه</span>
+          </div>
+          <h3>چگونه در ایندکس زندگی می‌کند</h3>
+          <p>هر حافظه یک ردیف <code>document</code> با <code>source_type='episodic'</code> و یک قطعه زیر آن می‌شود. بُردارها در ChromaDB کنار قطعه‌های اسناد قرار می‌گیرند؛ هماهنگ‌کننده <code>source_types</code> را گسترش می‌دهد تا همیشه episodic را شامل شود (<code>retrieval.always_include_episodic = true</code> به‌صورت پیش‌فرض).</p>
+          <h3>مسیر بازخوانی</h3>
+          <ul>
+            <li><strong>TaxonomyRetriever</strong> اسکن سند برگ خود را با پرس‌وجوی دوم بدون محدودیت روی همهٔ قطعه‌های episodic تکمیل می‌کند، پس حافظه‌های ذخیره‌شده زیر هر گره برای هر پرسش ظاهر می‌شوند.</li>
+            <li>در هدف PERSONAL با اصابت قوی episodic، ربات به قالب پاسخ حافظه‌محور می‌رود که با حقیقت آغاز و پیشنهاد کاوش بیشتر در اسناد می‌دهد.</li>
+          </ul>
+          <h3>بُردارسازی غیرهمزمان</h3>
+          <p><code>POST /api/memories?background=true</code> بلافاصله یک job_id بازمی‌گرداند. یک ترد daemon متن را بُردارسازی و قطعه را می‌نویسد؛ کارت پیشرفت کار را نشان می‌دهد بی‌آنکه چت مسدود شود.</p>`
+      }
+    },
+    "profile": {
+      en: {
+        title: "User profile",
+        eyebrow: "Input",
+        sub: "Preferences and identity that ride along with every prompt.",
+        natural: `<p>Beyond episodic facts, the bot keeps a short profile — your name, role, language preferences, anything else worth always knowing. It's small, durable, and rendered into the system prompt verbatim so every turn starts with you in context.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">ProfileStore</span><span class="chip">preferences table</span><span class="chip">{user_profile} slot</span>
+          </div>
+          <h3>Where it lives</h3>
+          <p>SQLite <code>preferences</code> table, single row per user. The <code>ContextBuilder</code> assembles a short text block from non-null fields and injects it into every answer prompt's <code>{user_profile}</code> placeholder.</p>
+          <h3>Auto-extraction</h3>
+          <p>An optional <code>SessionAutoExtractor</code> mines preferences from finished sessions on a daemon thread (one extra LLM call against <code>prompts/preference_extract.md</code>). Opt-in via <code>memory.auto_extract</code>.</p>`
+      },
+      fa: {
+        title: "پروفایل کاربر",
+        eyebrow: "ورودی",
+        sub: "ترجیحات و هویتی که با هر پرامپت همراه می‌شود.",
+        natural: `<p>فراتر از حقایق تجربه‌ای، ربات یک پروفایل کوتاه نگه می‌دارد — نام، نقش، ترجیحات زبانی و هرچه ارزش همیشه‌دانستن دارد. کوچک، پایدار و به‌طور عینی در پرامپت سیستم رندر می‌شود تا هر نوبت با شما در زمینه آغاز شود.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">ProfileStore</span><span class="chip">جدول preferences</span><span class="chip">جای‌نشین {user_profile}</span>
+          </div>
+          <h3>محل نگهداری</h3>
+          <p>جدول <code>preferences</code> در SQLite، یک ردیف به ازای هر کاربر. <code>ContextBuilder</code> از فیلدهای غیرتهی بلوک متن کوتاهی می‌سازد و در جای‌نشین <code>{user_profile}</code> هر پرامپت پاسخ تزریق می‌کند.</p>
+          <h3>استخراج خودکار</h3>
+          <p>یک <code>SessionAutoExtractor</code> اختیاری ترجیحات را از جلسات تمام‌شده روی ترد daemon استخراج می‌کند (یک فراخوانی اضافی LLM روی <code>prompts/preference_extract.md</code>). فعال‌سازی از طریق <code>memory.auto_extract</code>.</p>`
+      }
+    },
+    "upload-choice": {
+      en: {
+        title: "Auto vs manual filing",
+        eyebrow: "Input",
+        sub: "Let the system organize new documents, or place them yourself.",
+        natural: `<p>When you upload, you decide: the system auto-files each new doc into the best-matching taxonomy node, OR it stays unfiled and you drag it onto a node in the taxonomy page.</p><p>If you pick manual and forget, a banner reminds you the doc is still unfiled and offers a one-click auto-assign.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">DocAssigner</span><span class="chip">skip_taxonomy</span><span class="chip">POST /api/taxonomy/auto-assign</span>
+          </div>
+          <h3>Backend</h3>
+          <p>The ingest pipeline accepts <code>skip_taxonomy: bool</code>. When true, the auto-assign hook (the "5c" block in <code>IngestPipeline.ingest_document</code>) is bypassed and the doc lands without an assignment row.</p>
+          <h3>Assignment</h3>
+          <p><code>DocAssigner</code> is a greedy cosine descent over leaf centroids with an LLM tiebreak when the top-2 scores are within 0.05. Manual mode preserves the doc-meta cache so a later auto-assign is fast.</p>`
+      },
+      fa: {
+        title: "خودکار یا دستی",
+        eyebrow: "ورودی",
+        sub: "بگذارید سیستم اسناد جدید را سامان‌دهی کند یا خودتان آن‌ها را قرار دهید.",
+        natural: `<p>هنگام بارگذاری شما تصمیم می‌گیرید: سیستم هر سند جدید را در بهترین گرهٔ دسته‌بندی قرار دهد، یا دست‌نخورده بماند و خودتان روی گره در صفحهٔ دسته‌بندی بکشید.</p><p>اگر حالت دستی را برگزینید و فراموش کنید، یک نوار یادآوری می‌گوید سند هنوز ناثبت است و قرار دهی خودکار با یک کلیک پیشنهاد می‌دهد.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">DocAssigner</span><span class="chip">skip_taxonomy</span><span class="chip">POST /api/taxonomy/auto-assign</span>
+          </div>
+          <h3>سمت سرور</h3>
+          <p>خط لولهٔ ingest، <code>skip_taxonomy: bool</code> را می‌پذیرد. وقتی درست باشد، قلاب قرار دهی خودکار (بلوک «۵ج» در <code>IngestPipeline.ingest_document</code>) دور زده می‌شود و سند بدون ردیف ثبت قرار می‌گیرد.</p>
+          <h3>قرار دهی</h3>
+          <p><code>DocAssigner</code> یک نزول کسینوسی حریصانه روی مرکزی برگ‌هاست با تای‌برکر LLM وقتی فاصلهٔ دو امتیاز برتر کمتر از ۰٫۰۵ است. حالت دستی، کش متادیتای سند را حفظ می‌کند تا قرار دهی خودکار بعدی سریع باشد.</p>`
+      }
+    },
+    "taxonomy": {
+      en: {
+        title: "Hierarchical taxonomy",
+        eyebrow: "Organize",
+        sub: "A category tree of your library, proposed by an LLM, owned by you.",
+        natural: `<p>Your documents don't sit in one flat pile. The bot proposes a category tree — like folders inside folders — that mirrors how a librarian would shelve your library. You can rename, move, merge, or delete nodes in a visual editor.</p><p>When you ask a question, the system descends the tree to the most-relevant branch first, opens only those docs, and ignores the rest. This is what makes retrieval fast and focused.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">TaxonomyStore</span><span class="chip">beam_descend</span><span class="chip">packed float32 centroids</span><span class="chip">D3 force layout</span>
+          </div>
+          <h3>Build</h3>
+          <ul>
+            <li><strong>Doc summaries</strong> in parallel (one LLM call per doc), centroid-embedded, batched.</li>
+            <li><strong>LLM tree proposal</strong> with explicit <code>max_tokens=8192</code> + truncation salvage.</li>
+            <li><strong>Materialize</strong> into <code>kg_taxonomy_nodes</code> / <code>kg_taxonomy_assignments</code>.</li>
+            <li><strong>Overflow assignment</strong> for docs the proposal missed.</li>
+            <li><strong>Recompute centroids</strong> from final assignments.</li>
+          </ul>
+          <h3>Retrieve</h3>
+          <p>Beam-descend by cosine on node centroids (width ≈ 3, depth ≈ 5). Docs under picked leaves form a Chroma <code>doc_ids</code> filter — only those chunks are scored.</p>
+          <h3>Edit</h3>
+          <p>An interactive graphviz/D3 page exposes: drag-to-reparent, rename, add child, delete, unfile, recompute. Every edit is a single SQL transaction.</p>`
+      },
+      fa: {
+        title: "دسته‌بندی سلسله‌مراتبی",
+        eyebrow: "سازماندهی",
+        sub: "درخت دسته‌بندی کتابخانه، پیشنهاد LLM، در اختیار شما.",
+        natural: `<p>اسناد در یک تودهٔ تخت نمی‌مانند. ربات یک درخت دسته — پوشه درون پوشه — پیشنهاد می‌دهد که شبیه چینش یک کتابدار است. در ویرایشگر بصری می‌توانید گره‌ها را تغییر نام، جابه‌جا، ادغام یا حذف کنید.</p><p>هنگام پرسش، سیستم اول از مرتبط‌ترین شاخهٔ درخت پایین می‌آید، فقط همان اسناد را باز می‌کند و بقیه را نادیده می‌گیرد. این همان چیزی است که بازیابی را سریع و متمرکز می‌کند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">TaxonomyStore</span><span class="chip">beam_descend</span><span class="chip">centroid float32 فشرده</span><span class="chip">طرح‌بندی D3 force</span>
+          </div>
+          <h3>ساخت</h3>
+          <ul>
+            <li><strong>خلاصه‌های سند</strong> به‌صورت موازی (یک فراخوانی LLM به ازای هر سند)، بُردارسازی centroid، دسته‌ای.</li>
+            <li><strong>پیشنهاد درخت توسط LLM</strong> با <code>max_tokens=8192</code> صریح و salvage در صورت برش.</li>
+            <li><strong>تحقق</strong> در <code>kg_taxonomy_nodes</code> / <code>kg_taxonomy_assignments</code>.</li>
+            <li><strong>قرار دهی سرریز</strong> برای اسنادی که پیشنهاد جا انداخت.</li>
+            <li><strong>بازمحاسبهٔ مرکزی‌ها</strong> از قرار دهی نهایی.</li>
+          </ul>
+          <h3>بازیابی</h3>
+          <p>نزول beam با کسینوس روی مرکزی‌های گره (پهنا ≈ ۳، عمق ≈ ۵). اسناد زیر برگ‌های انتخاب‌شده فیلتر <code>doc_ids</code> Chroma را می‌سازند — فقط همان قطعه‌ها امتیازدهی می‌شوند.</p>
+          <h3>ویرایش</h3>
+          <p>صفحه graphviz/D3 تعاملی این‌ها را آشکار می‌کند: کشاندن برای تغییر والد، تغییر نام، افزودن فرزند، حذف، خروج از سامان، بازمحاسبه. هر ویرایش یک تراکنش SQL تنهاست.</p>`
+      }
+    },
+    "kg": {
+      en: {
+        title: "Knowledge graph",
+        eyebrow: "Organize",
+        sub: "Entities and relationships your documents actually mention.",
+        natural: `<p>For each document, the bot pulls out the named things — people, methods, datasets, formulas — and the relationships between them. The result is a graph: nodes for the things, edges for the relationships. When a question is entity-heavy, the bot walks this graph instead of doing a fresh text search.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">NetworkX MultiDiGraph</span><span class="chip">OpenIE prompts</span><span class="chip">spaCy NER</span><span class="chip">scipy PPR</span><span class="chip">Leiden communities</span>
+          </div>
+          <h3>Build</h3>
+          <p>Concurrent triple extraction (<code>prompts/triple_extraction.md</code>) per chunk; phrase + passage nodes are merged across synonyms via embedding cosine ≥ 0.8; per-doc upsert is idempotent. SQLite mirror at <code>kg_nodes</code> / <code>kg_edges</code> for transactional reads.</p>
+          <h3>Walk</h3>
+          <p><code>KGPPRRetriever</code> seeds Personalized PageRank from named entities in the query, propagates over the graph in pure scipy (power iteration with dangling-node redistribution), then hydrates the top passages.</p>
+          <h3>Optional backend</h3>
+          <p>Neo4j backend is shipped (18 protocol methods, parameterised Cypher). Selected via <code>kg.backend</code>; the default NetworkX backend keeps zero infrastructure cost for solo users.</p>`
+      },
+      fa: {
+        title: "گراف دانش",
+        eyebrow: "سازماندهی",
+        sub: "موجودیت‌ها و روابطی که اسنادتان واقعاً ذکر می‌کنند.",
+        natural: `<p>برای هر سند، ربات چیزهای نام‌دار — افراد، روش‌ها، مجموعه‌داده‌ها، فرمول‌ها — و روابط میانشان را بیرون می‌کشد. نتیجه گرافی است: گره برای چیزها، یال برای روابط. وقتی پرسش بر موجودیت تأکید دارد، ربات این گراف را می‌پیماید به‌جای جست‌وجوی متنی تازه.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">NetworkX MultiDiGraph</span><span class="chip">پرامپت‌های OpenIE</span><span class="chip">spaCy NER</span><span class="chip">scipy PPR</span><span class="chip">جوامع لایدن</span>
+          </div>
+          <h3>ساخت</h3>
+          <p>استخراج سه‌تایی همزمان (<code>prompts/triple_extraction.md</code>) به ازای هر قطعه؛ گره‌های عبارت + گذرگاه با کسینوس embedding ≥ ۰٫۸ روی مترادف‌ها ادغام می‌شوند؛ upsert هر سند ایدمپوتنت است. آینه در SQLite در <code>kg_nodes</code> / <code>kg_edges</code> برای خواندن تراکنشی.</p>
+          <h3>پیمایش</h3>
+          <p><code>KGPPRRetriever</code> Personalized PageRank را از موجودیت‌های نامی در پرس‌وجو seed می‌کند، در scipy خالص (پیمایش توانی با توزیع گرهٔ معلق) روی گراف منتشر می‌کند و سپس قطعه‌های برتر را hydrate می‌کند.</p>
+          <h3>پشتیبان اختیاری</h3>
+          <p>پشتیبان Neo4j عرضه شده (۱۸ متد پروتکل، Cypher پارامتری). از طریق <code>kg.backend</code> انتخاب می‌شود؛ پشتیبان پیش‌فرض NetworkX برای کاربر تنها هزینهٔ زیرساخت صفر است.</p>`
+      }
+    },
+    "communities": {
+      en: {
+        title: "Community summaries",
+        eyebrow: "Organize",
+        sub: "Pre-summarized clusters of related ideas, ready when you ask the big questions.",
+        natural: `<p>The knowledge graph naturally clusters into communities — groups of nodes that talk about the same theme. The bot writes a short summary of each cluster ahead of time. When you ask a "what is X about overall?" question, those summaries answer it without scanning a thousand chunks.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">leidenalg + python-igraph</span><span class="chip">3 resolutions</span><span class="chip">hrag_community_summaries</span>
+          </div>
+          <h3>Detection &amp; summarization</h3>
+          <p>Leiden community detection at three resolutions (coarse, medium, fine). Each community is summarized concurrently via <code>prompts/community_summary.md</code>. Summaries live in a Chroma collection (<code>hrag_community_summaries</code>) and a SQLite mirror (<code>kg_communities</code>).</p>
+          <h3>Retrieval path</h3>
+          <p><code>CommunityRetriever</code> is the "global" branch of the LLM router — fired on cross-document queries. RRF-fused with vector/BM25 results in the ambiguous and cross_document classes.</p>`
+      },
+      fa: {
+        title: "خلاصه‌های جامعه",
+        eyebrow: "سازماندهی",
+        sub: "خوشه‌های از پیش خلاصه‌شدهٔ ایده‌های مرتبط، آمادهٔ پرسش‌های بزرگ.",
+        natural: `<p>گراف دانش طبیعتاً به جوامع خوشه می‌شود — گروه‌هایی از گره‌ها که دربارهٔ یک مضمون سخن می‌گویند. ربات از پیش خلاصهٔ کوتاهی از هر خوشه می‌نویسد. وقتی می‌پرسید «در مجموع X دربارهٔ چیست؟»، این خلاصه‌ها بدون اسکن هزاران قطعه پاسخ می‌دهند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">leidenalg + python-igraph</span><span class="chip">۳ وضوح</span><span class="chip">hrag_community_summaries</span>
+          </div>
+          <h3>تشخیص و خلاصه‌سازی</h3>
+          <p>تشخیص جامعهٔ لایدن در سه وضوح (درشت، متوسط، ریز). هر جامعه به‌طور همزمان از طریق <code>prompts/community_summary.md</code> خلاصه می‌شود. خلاصه‌ها در یک مجموعهٔ Chroma (<code>hrag_community_summaries</code>) و آینهٔ SQLite (<code>kg_communities</code>) قرار دارند.</p>
+          <h3>مسیر بازیابی</h3>
+          <p><code>CommunityRetriever</code> شاخهٔ «جهانی» مسیریاب LLM است — برای پرس‌وجوهای میان‌سندی فعال می‌شود. با نتایج vector/BM25 در کلاس‌های ambiguous و cross_document با RRF ادغام می‌شود.</p>`
+      }
+    },
+    "math": {
+      en: {
+        title: "Math-aware ingest",
+        eyebrow: "Organize",
+        sub: "Formulas survive the pipeline, get flagged, and get retrieved when you ask.",
+        natural: `<p>Equations in a PDF often look like a jumble of Greek letters and operators after extraction. The bot detects them — both LaTeX-style and Unicode-glyph forms — flags those chunks, and on questions like "give me the loss function," uses the flag to surface the right passages.</p><p>After the main answer, a second pass extracts every formula verbatim into a clean block.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">has_math regex</span><span class="chip">Unicode glyph detector</span><span class="chip">math-meta query rewriter</span><span class="chip">where=&#123;has_math:true&#125;</span>
+          </div>
+          <h3>Detection</h3>
+          <p><code>has_unicode_math(text, min_signals=2)</code> looks for Greek letters, math operators (∑ ∫ ∏ √), subscripts/superscripts, equation density (2+ <code>=</code> in 200 chars), function-of-variable patterns. Combined with LaTeX-delimiter detection in <code>has_math</code>.</p>
+          <h3>Retrieval routing</h3>
+          <p>Orchestrator's <code>_is_math_meta_query</code> regex detects content-type questions ("formula", "equation", "derivation", "math") and pushes <code>where={"has_math": True}</code> into the retriever. Empty-result fallback retries unfiltered.</p>
+          <h3>Extraction pass</h3>
+          <p>When <code>formula_extraction.enabled=true</code> AND results exist, a second LLM call against <code>prompts/extract_formulas.md</code> appends a <code>**Extracted formulas:**</code> block to the answer.</p>`
+      },
+      fa: {
+        title: "پردازش آگاه از فرمول",
+        eyebrow: "سازماندهی",
+        sub: "فرمول‌ها از خط لوله جان به‌در می‌برند، برچسب می‌خورند و هنگام پرسش بازیابی می‌شوند.",
+        natural: `<p>معادله‌ها در PDF پس از استخراج اغلب مشتی از حروف یونانی و عملگر به نظر می‌رسند. ربات آن‌ها را تشخیص می‌دهد — هم سبک LaTeX هم نمادهای یونیکد — قطعه‌ها را علامت می‌زند و در پرسش‌هایی مانند «تابع زیان را بده»، از این علامت برای آشکار کردن قطعه‌های درست استفاده می‌کند.</p><p>پس از پاسخ اصلی، گذر دوم همهٔ فرمول‌ها را عیناً در یک بلوک تمیز استخراج می‌کند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">regex has_math</span><span class="chip">شناساگر نماد یونیکد</span><span class="chip">بازنویس math-meta</span><span class="chip">where=&#123;has_math:true&#125;</span>
+          </div>
+          <h3>تشخیص</h3>
+          <p><code>has_unicode_math(text, min_signals=2)</code> دنبال حروف یونانی، عملگرهای ریاضی (∑ ∫ ∏ √)، زیر/زبرنویس، چگالی معادله (۲+ <code>=</code> در ۲۰۰ کاراکتر) و الگوهای تابع متغیر می‌گردد. ترکیب با تشخیص جداکنندهٔ LaTeX در <code>has_math</code>.</p>
+          <h3>هدایت بازیابی</h3>
+          <p>regex <code>_is_math_meta_query</code> هماهنگ‌کننده پرسش‌های نوع محتوا («فرمول»، «معادله»، «اشتقاق»، «ریاضی») را تشخیص می‌دهد و <code>where={"has_math": True}</code> را به بازیاب می‌فرستد. در صورت نتیجهٔ خالی، بدون فیلتر تلاش مجدد می‌شود.</p>
+          <h3>گذر استخراج</h3>
+          <p>وقتی <code>formula_extraction.enabled=true</code> و نتیجه وجود دارد، فراخوانی دوم LLM روی <code>prompts/extract_formulas.md</code> بلوک <code>**Extracted formulas:**</code> را به پاسخ می‌افزاید.</p>`
+      }
+    },
+    "multi-retriever": {
+      en: {
+        title: "Multi-retriever fusion",
+        eyebrow: "Retrieve",
+        sub: "Five different ways to find a passage, working in concert.",
+        natural: `<p>One retrieval style is never enough. The bot runs several in parallel: dense vector similarity for semantic matches, BM25 for exact word matches, the knowledge graph for entity walks, community summaries for high-level themes, and the taxonomy for topic-scoping. A fusion stage merges their rankings.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">VectorRetriever</span><span class="chip">BM25Retriever</span><span class="chip">HybridRetriever (RRF)</span><span class="chip">KGPPRRetriever</span><span class="chip">CommunityRetriever</span><span class="chip">TaxonomyRetriever</span><span class="chip">QueryRouter</span>
+          </div>
+          <h3>Router</h3>
+          <p>5-shot LLM classifier (<code>prompts/router.md</code>) labels a query as <code>entity</code> / <code>global</code> / <code>cross_document</code> / <code>ambiguous</code>. Each label dispatches a different subset of retrievers. The <code>cross_document</code> and <code>ambiguous</code> paths RRF-fuse all four.</p>
+          <h3>Fusion</h3>
+          <p>Reciprocal Rank Fusion across heterogeneous score scales — vector cosine, BM25 logits, PPR scores, community-summary similarity. No re-tuning needed.</p>
+          <h3>Wrappers</h3>
+          <p>Every retriever can be wrapped by <code>DocScopedRetriever</code> (title-aware filter for "in document X" queries) and respects the Phase 7-A <code>where</code> kwarg for metadata filters.</p>`
+      },
+      fa: {
+        title: "ترکیب چند بازیاب",
+        eyebrow: "بازیابی",
+        sub: "پنج روش متفاوت برای یافتن قطعه، در هماهنگی.",
+        natural: `<p>یک سبک بازیابی هرگز کافی نیست. ربات چند سبک را موازی اجرا می‌کند: شباهت بُرداری متراکم برای انطباق معنایی، BM25 برای انطباق کلمهٔ دقیق، گراف دانش برای پیمایش موجودیت، خلاصه‌های جامعه برای مضمون‌های کلان و دسته‌بندی برای محدود‌سازی موضوعی. مرحلهٔ ادغام رتبه‌ها را با هم می‌آمیزد.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">VectorRetriever</span><span class="chip">BM25Retriever</span><span class="chip">HybridRetriever (RRF)</span><span class="chip">KGPPRRetriever</span><span class="chip">CommunityRetriever</span><span class="chip">TaxonomyRetriever</span><span class="chip">QueryRouter</span>
+          </div>
+          <h3>مسیریاب</h3>
+          <p>دسته‌بند LLM پنج‌نمونه‌ای (<code>prompts/router.md</code>) پرس‌وجو را <code>entity</code> / <code>global</code> / <code>cross_document</code> / <code>ambiguous</code> برچسب می‌زند. هر برچسب زیرمجموعهٔ متفاوتی از بازیاب‌ها را ارسال می‌کند. مسیرهای <code>cross_document</code> و <code>ambiguous</code> هر چهار را با RRF ادغام می‌کنند.</p>
+          <h3>ادغام</h3>
+          <p>Reciprocal Rank Fusion روی مقیاس‌های امتیاز ناهمگن — کسینوس بُرداری، logit BM25، امتیاز PPR، شباهت خلاصهٔ جامعه. تنظیم مجدد لازم ندارد.</p>
+          <h3>پوسته‌ها</h3>
+          <p>هر بازیاب می‌تواند در <code>DocScopedRetriever</code> پیچیده شود (فیلتر مبتنی بر عنوان برای پرس‌وجوهای «در سند X») و kwarg <code>where</code> فاز ۷-الف را برای فیلتر متادیتا رعایت می‌کند.</p>`
+      }
+    },
+    "adaptive": {
+      en: {
+        title: "Adaptive per intent",
+        eyebrow: "Retrieve",
+        sub: "Tunes itself per turn — small talk gets a sprint, deep questions get a wider net.",
+        natural: `<p>A greeting like "hi" doesn't need 12 documents and a reranker; a deep research question does. The bot classifies each turn's intent and dials retrieval up or down accordingly. Personal questions also bias memories toward the top.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">Intent enum</span><span class="chip">_adaptive_top_k</span><span class="chip">adaptive_retriever_per_intent</span>
+          </div>
+          <h3>Intents</h3>
+          <p><code>GREETING</code> / <code>PERSONAL</code> / <code>FACTUAL</code> / <code>GENERAL</code> / <code>UNCLEAR</code>. Classifier is conversation-aware — last 2-3 turns + the entity tracker keep follow-up questions on the same intent.</p>
+          <h3>Per-intent tuning</h3>
+          <ul>
+            <li><code>_adaptive_top_k(cfg, intent)</code> returns <code>(top_k_vector, top_k_final)</code> per intent. <code>(None, None)</code> on GREETING skips retrieval entirely.</li>
+            <li><code>retrieval.adaptive_retriever_per_intent</code> can swap the active retriever per intent — e.g. <code>bm25</code> for entity-heavy questions.</li>
+            <li>PERSONAL stable-sorts episodic chunks to the top.</li>
+          </ul>`
+      },
+      fa: {
+        title: "سازگار با هدف کاربر",
+        eyebrow: "بازیابی",
+        sub: "خود را در هر نوبت تنظیم می‌کند — گفت‌وگوی ساده اسپرینت، پرسش عمیق شبکهٔ پهن‌تر.",
+        natural: `<p>یک سلام مانند «سلام» به ۱۲ سند و reranker نیاز ندارد؛ پرسش پژوهشی عمیق چرا. ربات هدف هر نوبت را دسته‌بندی می‌کند و بازیابی را بالا یا پایین می‌برد. پرسش‌های شخصی نیز حافظه‌ها را به بالای فهرست می‌برند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">Intent enum</span><span class="chip">_adaptive_top_k</span><span class="chip">adaptive_retriever_per_intent</span>
+          </div>
+          <h3>اهداف</h3>
+          <p><code>GREETING</code> / <code>PERSONAL</code> / <code>FACTUAL</code> / <code>GENERAL</code> / <code>UNCLEAR</code>. دسته‌بند آگاه از گفت‌وگو است — ۲ تا ۳ نوبت اخیر + ردگیر موجودیت پرسش‌های پی‌گیر را روی همان هدف نگه می‌دارند.</p>
+          <h3>تنظیم به ازای هدف</h3>
+          <ul>
+            <li><code>_adaptive_top_k(cfg, intent)</code> به ازای هدف <code>(top_k_vector, top_k_final)</code> بازمی‌گرداند. <code>(None, None)</code> روی GREETING بازیابی را کاملاً صرف‌نظر می‌کند.</li>
+            <li><code>retrieval.adaptive_retriever_per_intent</code> می‌تواند بازیاب فعال را به ازای هدف عوض کند — مثلاً <code>bm25</code> برای پرسش‌های موجودیت‌محور.</li>
+            <li>PERSONAL با مرتب‌سازی پایدار، قطعه‌های episodic را به بالا می‌برد.</li>
+          </ul>`
+      }
+    },
+    "rerank": {
+      en: {
+        title: "Rerank & organize",
+        eyebrow: "Retrieve",
+        sub: "Order the survivors the way a writer would quote them.",
+        natural: `<p>Even good retrieval returns near-duplicates and slightly off-topic passages. A reranker takes the survivors, scores them more carefully, and drops the weak ones. Then a tree-organizer arranges what's left so quotes flow like an outline rather than a pile.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">CrossEncoderReranker</span><span class="chip">LLMReranker</span><span class="chip">BatchedLLMReranker</span><span class="chip">KG2RAG MST</span>
+          </div>
+          <h3>Reranking</h3>
+          <p>Default is <code>cross-encoder/ms-marco-MiniLM-L-6-v2</code> with a permissive logit threshold (<code>-5.0</code>). LLM rerankers (0-3 score per chunk, batched or per-chunk) are available for higher fidelity. <strong>Critical fallback</strong>: if rerank drops everything, the orchestrator falls back to the unreranked top-K — never silent zero-results.</p>
+          <h3>Organize</h3>
+          <p><code>MSTOrganizer</code> (KG2RAG-style) builds a redundancy-pruned tree of the kept chunks. Quotes get ordered by graph adjacency so the answer reads coherently. No-op when the KG is empty.</p>`
+      },
+      fa: {
+        title: "رتبه‌بندی و سامان‌دهی",
+        eyebrow: "بازیابی",
+        sub: "بازماندگان را همان‌گونه که نویسنده نقل می‌کند مرتب کنید.",
+        natural: `<p>حتی بازیابی خوب هم تکرارهای نزدیک و قطعه‌های اندکی بی‌ربط بازمی‌گرداند. یک reranker بازماندگان را با دقت بیشتری امتیاز می‌دهد و ضعیف‌ها را می‌اندازد. سپس سامان‌دهندهٔ درختی باقی‌مانده را چنان می‌چیند که نقل‌قول‌ها مانند طرح‌نامه روان شوند نه تودهٔ نامرتب.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">CrossEncoderReranker</span><span class="chip">LLMReranker</span><span class="chip">BatchedLLMReranker</span><span class="chip">KG2RAG MST</span>
+          </div>
+          <h3>رتبه‌بندی مجدد</h3>
+          <p>پیش‌فرض <code>cross-encoder/ms-marco-MiniLM-L-6-v2</code> با آستانهٔ logit آزاد (<code>-۵٫۰</code>). reranker‌های LLM (امتیاز ۰ تا ۳ به ازای هر قطعه، دسته‌ای یا به ازای قطعه) برای دقت بالاتر در دسترس‌اند. <strong>سقوط حیاتی</strong>: اگر rerank همه را بیندازد، هماهنگ‌کننده به top-K بدون rerank بازمی‌گردد — هرگز نتیجهٔ صفر خاموش نیست.</p>
+          <h3>سامان‌دهی</h3>
+          <p><code>MSTOrganizer</code> (سبک KG2RAG) درختی هرس‌شده از قطعه‌های نگه‌داشته‌شده می‌سازد. نقل‌قول‌ها بر اساس مجاورت گراف چیده می‌شوند تا پاسخ منسجم خوانده شود. در صورت خالی بودن KG، هیچ کاری نمی‌کند.</p>`
+      }
+    },
+    "gate": {
+      en: {
+        title: "Smart skip gate",
+        eyebrow: "Retrieve",
+        sub: "When a question doesn't need retrieval, the bot doesn't pretend it does.",
+        natural: `<p>"Hi" doesn't deserve a knowledge-base scan. A small classifier decides whether a turn even needs documents at all — small-talk, greetings, and yes/no follow-ups skip the whole pipeline and go straight to the LLM.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">RAGate</span><span class="chip">prompts/gate.md</span><span class="chip">fail-open</span>
+          </div>
+          <h3>RAGate</h3>
+          <p>Single LLM call against <code>prompts/gate.md</code> classifying the turn as <code>RETRIEVE</code> or <code>SKIP</code>. Fail-open: any garbled response defaults to RETRIEVE so the user is never silently dropped from the corpus. When SKIP fires, intent is rewritten to GENERAL and the pipeline routes to the world-knowledge answer template.</p>
+          <h3>Toggle</h3>
+          <p><code>compaction.gate_enabled</code> in config; off by default. Pairs with <code>clue_enabled</code>, <code>dialog_mst_enabled</code>, and <code>mask_uncertain</code>.</p>`
+      },
+      fa: {
+        title: "دروازهٔ هوشمند",
+        eyebrow: "بازیابی",
+        sub: "وقتی پرسش به بازیابی نیاز ندارد، ربات وانمود نمی‌کند نیاز دارد.",
+        natural: `<p>«سلام» شایستهٔ اسکن پایگاه دانش نیست. یک دسته‌بند کوچک تصمیم می‌گیرد آیا نوبت اصلاً به سند نیاز دارد — گفت‌وگوی ساده، احوال‌پرسی و پی‌گیری‌های بله/خیر کل خط لوله را رد می‌کنند و مستقیم به LLM می‌روند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">RAGate</span><span class="chip">prompts/gate.md</span><span class="chip">fail-open</span>
+          </div>
+          <h3>RAGate</h3>
+          <p>یک فراخوانی LLM روی <code>prompts/gate.md</code> نوبت را <code>RETRIEVE</code> یا <code>SKIP</code> دسته می‌کند. fail-open: هر پاسخ مخدوش پیش‌فرض RETRIEVE است تا کاربر هرگز خاموش از پیکره رها نشود. وقتی SKIP فعال شود، هدف به GENERAL بازنویسی شده و خط لوله به قالب پاسخ دانش جهانی می‌رود.</p>
+          <h3>کلید</h3>
+          <p><code>compaction.gate_enabled</code> در config؛ به‌طور پیش‌فرض خاموش. با <code>clue_enabled</code>، <code>dialog_mst_enabled</code> و <code>mask_uncertain</code> جفت می‌شود.</p>`
+      }
+    },
+    "raft": {
+      en: {
+        title: "Verbatim reasoning",
+        eyebrow: "Reason",
+        sub: "Quote first, then conclude.",
+        natural: `<p>The bot is told to quote the relevant lines verbatim from the source passages BEFORE writing its own conclusion. You see the citations woven into the answer, so it's clear what's grounded and what isn't.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">RAFT prompt</span><span class="chip">##begin_quote##</span><span class="chip">CoT reasoning trace</span>
+          </div>
+          <h3>Prompt shape</h3>
+          <p><code>prompts/answer.md</code> is RAFT-style: it asks the model to find relevant quotes, wrap each in <code>##begin_quote##...##end_quote##</code>, write a short reasoning trace, then the final answer. The trace and quotes are stripped server-side before rendering by default; toggle via <code>show_reasoning_trace</code>.</p>
+          <h3>Detail</h3>
+          <p>The "Reasoning" expander in the chat panel shows the model's intermediate steps when you want to audit a tricky answer.</p>`
+      },
+      fa: {
+        title: "استدلال با نقل عین",
+        eyebrow: "استدلال",
+        sub: "اول نقل، سپس نتیجه.",
+        natural: `<p>به ربات گفته می‌شود پیش از نتیجه‌گیری خود، خطوط مرتبط را عیناً از قطعه‌های منبع نقل کند. ارجاعات را در دل پاسخ می‌بینید، پس روشن است چه چیزی پایه‌گذاری شده و چه چیزی نه.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">پرامپت RAFT</span><span class="chip">##begin_quote##</span><span class="chip">رد استدلال CoT</span>
+          </div>
+          <h3>شکل پرامپت</h3>
+          <p><code>prompts/answer.md</code> سبک RAFT است: از مدل می‌خواهد نقل‌قول‌های مرتبط را بیابد، هر یک را در <code>##begin_quote##...##end_quote##</code> بپیچد، رد استدلال کوتاهی بنویسد و سپس پاسخ نهایی را. رد و نقل‌قول‌ها به‌طور پیش‌فرض سمت سرور پیش از رندر حذف می‌شوند؛ کلید <code>show_reasoning_trace</code>.</p>
+          <h3>جزئیات</h3>
+          <p>بازکنندهٔ «استدلال» در پنل چت گام‌های میانی مدل را وقتی می‌خواهید پاسخی دشوار را ممیزی کنید نشان می‌دهد.</p>`
+      }
+    },
+    "uncertain": {
+      en: {
+        title: "Uncertainty marking",
+        eyebrow: "Reason",
+        sub: "When the model isn't sure, you see the doubt — not a confident-sounding guess.",
+        natural: `<p>If the model can't back a sub-claim with a direct quote, the prompt tells it to mark that claim as <code>[UNCERTAIN]</code>. You see a ⚠ glyph next to that part of the answer. No hidden hallucinations dressed as facts.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">render_uncertain</span><span class="chip">strip_uncertain</span><span class="chip">idempotent regex</span>
+          </div>
+          <h3>Marker pipeline</h3>
+          <p><code>prompts/answer.md</code> instructs the model to append <code>[UNCERTAIN]</code> after any unsupported sub-claim. Post-generation, <code>render_uncertain</code> replaces it with a visible glyph; <code>strip_uncertain</code> silently removes it when <code>compaction.mask_uncertain=false</code>. Both are pure regex passes and fully idempotent.</p>`
+      },
+      fa: {
+        title: "نشانه‌گذاری تردید",
+        eyebrow: "استدلال",
+        sub: "وقتی مدل مطمئن نیست، تردید را می‌بینید — نه حدسی با لحن قاطع.",
+        natural: `<p>اگر مدل نتواند ادعای جزئی را با نقل مستقیم پشتیبانی کند، پرامپت می‌گوید آن را با <code>[UNCERTAIN]</code> علامت بزند. نشانهٔ ⚠ کنار آن بخش پاسخ ظاهر می‌شود. توهم پنهان به‌جای واقعیت نه.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">render_uncertain</span><span class="chip">strip_uncertain</span><span class="chip">regex ایدمپوتنت</span>
+          </div>
+          <h3>خط لولهٔ نشانه‌گذاری</h3>
+          <p><code>prompts/answer.md</code> به مدل می‌گوید پس از هر ادعای پشتیبان‌نشده <code>[UNCERTAIN]</code> الحاق کند. پس از تولید، <code>render_uncertain</code> آن را با نمادی قابل‌رؤیت جایگزین می‌کند؛ <code>strip_uncertain</code> وقتی <code>compaction.mask_uncertain=false</code> در سکوت حذف می‌کند. هر دو گذرهای regex خالص و کاملاً ایدمپوتنت‌اند.</p>`
+      }
+    },
+    "clue": {
+      en: {
+        title: "Clue generation",
+        eyebrow: "Reason",
+        sub: "Form a guess about the answer before searching — that guess often retrieves better than the question.",
+        natural: `<p>Sometimes the words in your question and the words in the answer-bearing passage don't overlap. MemoRAG-style clue generation has the bot write a quick hypothesis of what an answer might look like, then uses that hypothesis as the retrieval query. Recall lifts on ambiguous turns.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">ClueGenerator</span><span class="chip">prompts/clue.md</span><span class="chip">fallback to question</span>
+          </div>
+          <h3>Flow</h3>
+          <p>One LLM call against <code>prompts/clue.md</code> after intent classification, before retrieval. The clue text replaces the retrieval query; the original question is still what reaches the answer prompt. On empty or errored clue, the system falls back to the literal question.</p>
+          <h3>Surface</h3>
+          <p>The clue is now editable in the inline review card when a pause fires — you see what the bot thinks you mean and can correct it.</p>`
+      },
+      fa: {
+        title: "تولید سرنخ",
+        eyebrow: "استدلال",
+        sub: "پیش از جست‌وجو حدسی دربارهٔ پاسخ بزن — این حدس اغلب بهتر از پرسش بازیابی می‌کند.",
+        natural: `<p>گاهی کلمات پرسش و کلمات قطعهٔ پاسخ‌دار همپوشانی ندارند. تولید سرنخ سبک MemoRAG ربات را وادار می‌کند فرضیه‌ای سریع از ظاهر پاسخ بنویسد و سپس از آن فرضیه به‌عنوان پرس‌وجوی بازیابی استفاده کند. بازخوانی روی نوبت‌های مبهم بالا می‌رود.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">ClueGenerator</span><span class="chip">prompts/clue.md</span><span class="chip">سقوط به پرسش</span>
+          </div>
+          <h3>جریان</h3>
+          <p>یک فراخوانی LLM روی <code>prompts/clue.md</code> پس از دسته‌بندی هدف، پیش از بازیابی. متن سرنخ پرس‌وجوی بازیابی را جایگزین می‌کند؛ پرسش اصلی همچنان آن چیزی است که به پرامپت پاسخ می‌رسد. در سرنخ خالی یا خطادار، سیستم به پرسش عینی بازمی‌گردد.</p>
+          <h3>نمایش</h3>
+          <p>سرنخ اکنون در کارت بازبینی درون چت قابل‌ویرایش است — وقتی مکث رخ دهد، می‌بینید ربات فکر می‌کند چه می‌گویید و می‌توانید اصلاح کنید.</p>`
+      }
+    },
+    "formula": {
+      en: {
+        title: "Formula extraction",
+        eyebrow: "Reason",
+        sub: "Every equation from the cited passages, verbatim, in one clean block.",
+        natural: `<p>When you ask about formulas or equations, the bot first writes its normal answer, then runs a second LLM pass that extracts every formula it can find in the cited passages — keeping the exact characters intact (Greek letters, operators, subscripts). The result is appended as a clean block under the answer.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">prompts/extract_formulas.md</span><span class="chip">formula_extraction.enabled</span><span class="chip">post-RAFT pass</span>
+          </div>
+          <h3>Gate</h3>
+          <p>Fires when <code>formula_extraction.enabled=true</code> AND the orchestrator's <code>_is_math_meta_query</code> regex matches AND retrieval returned at least one chunk. Emits a <code>formula_extract</code> progress event.</p>
+          <h3>Output</h3>
+          <p>Appended to the answer text as a <code>**Extracted formulas:**</code> markdown block. Renders as a styled list in the chat panel; survives the streaming-markdown path.</p>`
+      },
+      fa: {
+        title: "استخراج فرمول",
+        eyebrow: "استدلال",
+        sub: "هر معادله از قطعه‌های ذکرشده، عیناً، در یک بلوک تمیز.",
+        natural: `<p>وقتی دربارهٔ فرمول یا معادله می‌پرسید، ربات اول پاسخ عادی می‌نویسد، سپس گذر دوم LLM هر فرمول قابل‌یافت در قطعه‌های ذکرشده را استخراج می‌کند — کاراکترهای دقیق (حروف یونانی، عملگرها، زیرنویس) دست‌نخورده می‌مانند. نتیجه به‌صورت بلوک تمیز زیر پاسخ افزوده می‌شود.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">prompts/extract_formulas.md</span><span class="chip">formula_extraction.enabled</span><span class="chip">گذر پس از RAFT</span>
+          </div>
+          <h3>دروازه</h3>
+          <p>وقتی <code>formula_extraction.enabled=true</code> و regex <code>_is_math_meta_query</code> هماهنگ‌کننده انطباق می‌یابد و بازیابی حداقل یک قطعه برمی‌گرداند، فعال می‌شود. رویداد پیشرفت <code>formula_extract</code> منتشر می‌کند.</p>
+          <h3>خروجی</h3>
+          <p>به متن پاسخ به‌صورت بلوک مارک‌داون <code>**Extracted formulas:**</code> الحاق می‌شود. در پنل چت به‌صورت فهرست استایل‌دار رندر می‌شود؛ از مسیر مارک‌داون جریانی جان به‌در می‌برد.</p>`
+      }
+    },
+    "review": {
+      en: {
+        title: "Inline review pause",
+        eyebrow: "Interact",
+        sub: "On a low-confidence turn, the bot pauses inside the chat and asks how to proceed.",
+        natural: `<p>If the question is ambiguous, the retrieval scores are low, or the bot suspects you might be off-corpus, it pauses BEFORE writing an answer. A small card appears in the chat thread showing what it found and what it thinks you mean. You can:</p><ul><li>Edit the bot's guess at your question</li><li>Pick a different phrasing from suggestions</li><li>Filter the sources it should use</li><li>Tell it to skip your docs and answer from general knowledge</li><li>Ask it to clarify with a question of its own</li></ul><p>The card collapses to a one-line summary once you respond — the conversation stays in one place.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">interaction/review.py</span><span class="chip">InteractionStore</span><span class="chip">SSE review_required</span><span class="chip">POST /api/chat/turns/&#123;id&#125;/resume</span>
+          </div>
+          <h3>Trigger heuristics</h3>
+          <p>Smart-auto mode pauses on any of: max rerank below <code>review_score_floor</code>, top-2 spread under <code>review_ambiguity_delta</code>, taxonomy hit count above <code>review_branch_threshold</code>, intent=UNCLEAR, router=ambiguous, factual→general swap imminent. Personal turns with strong episodic hits skip the pause and answer warmly.</p>
+          <h3>Resume contract</h3>
+          <p>Frontend POSTs <code>{action, selected_chunk_ids?, rewritten_query?, expand_from_doc_id?, redirect_taxonomy_node_id?, include_episodic, remember_choice}</code> to <code>/api/chat/turns/{id}/resume</code>. Server unblocks the orchestrator thread (waiting on a <code>threading.Event</code>) and applies the decision before <code>generate_start</code>.</p>
+          <h3>Card UI</h3>
+          <p>Lives in the chat thread, not a modal. Reason chips, editable clue, rephrasing chips, taxonomy breadcrumbs, source checkboxes with "why?" + "more like this", episodic toggle, keyboard shortcuts (Enter / Esc / 1-9 / E / R / G / C).</p>`
+      },
+      fa: {
+        title: "مکث بازبینی درون چت",
+        eyebrow: "تعامل",
+        sub: "در نوبت کم‌اطمینان، ربات درون چت مکث می‌کند و می‌پرسد چگونه پیش رود.",
+        natural: `<p>اگر پرسش مبهم باشد، امتیاز بازیابی پایین باشد یا ربات حدس بزند ممکن است خارج از پیکره باشید، پیش از نوشتن پاسخ مکث می‌کند. کارت کوچکی در رشتهٔ چت آشکار می‌شود که نشان می‌دهد چه یافت و چه فکر می‌کند می‌گویید. می‌توانید:</p><ul><li>حدس ربات از پرسش‌تان را ویرایش کنید</li><li>عبارت‌بندی متفاوتی از پیشنهادها برگزینید</li><li>منابعی که باید استفاده شوند را فیلتر کنید</li><li>به ربات بگویید اسناد را رها کند و از دانش جهانی پاسخ دهد</li><li>از ربات بخواهید پرسشی روشن‌کننده مطرح کند</li></ul><p>کارت پس از پاسخ شما به خلاصهٔ یک‌خطی فشرده می‌شود — گفت‌وگو در یک جا می‌ماند.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">interaction/review.py</span><span class="chip">InteractionStore</span><span class="chip">SSE review_required</span><span class="chip">POST /api/chat/turns/&#123;id&#125;/resume</span>
+          </div>
+          <h3>هیوریستیک ماشه</h3>
+          <p>حالت smart-auto در هر یک از این موارد مکث می‌کند: حداکثر rerank زیر <code>review_score_floor</code>، فاصلهٔ دو برتر زیر <code>review_ambiguity_delta</code>، شمار اصابت دسته‌بندی بالاتر از <code>review_branch_threshold</code>، intent=UNCLEAR، router=ambiguous، چرخش factual→general قریب‌الوقوع. نوبت‌های personal با اصابت قوی episodic مکث را رد می‌کنند و گرم پاسخ می‌دهند.</p>
+          <h3>قرارداد resume</h3>
+          <p>فرانت‌اند <code>{action, selected_chunk_ids?, rewritten_query?, expand_from_doc_id?, redirect_taxonomy_node_id?, include_episodic, remember_choice}</code> را به <code>/api/chat/turns/{id}/resume</code> POST می‌کند. سرور ترد هماهنگ‌کننده (در انتظار روی <code>threading.Event</code>) را آزاد و تصمیم را پیش از <code>generate_start</code> اعمال می‌کند.</p>
+          <h3>UI کارت</h3>
+          <p>در رشتهٔ چت زندگی می‌کند، نه modal. چیپ‌های دلیل، سرنخ قابل‌ویرایش، چیپ‌های بازنویسی، breadcrumb دسته‌بندی، چک‌باکس منبع با «چرا؟» + «بیشتر شبیه این»، toggle episodic، میان‌برهای صفحه‌کلید (Enter / Esc / 1-9 / E / R / G / C).</p>`
+      }
+    },
+    "stream": {
+      en: {
+        title: "Live markdown stream",
+        eyebrow: "Interact",
+        sub: "Bold, code, lists render as the LLM types — no buffer-to-end.",
+        natural: `<p>Other chat UIs collect the LLM's plain-text stream and only run the markdown renderer once at the end — you watch raw <code>**asterisks**</code> for ten seconds, then they snap into bold. Here, the renderer runs ~30 times per second as tokens arrive. The page reads as it writes.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">marked.parse</span><span class="chip">DOMPurify</span><span class="chip">33 ms debounce</span><span class="chip">md-cursor</span>
+          </div>
+          <h3>Loop</h3>
+          <p>Token handler appends to <code>els.bubble._rawText</code> then calls <code>scheduleStreamingMdRender(els)</code>. A 33 ms debounce caps re-renders at ~30/sec — fast enough to feel live, throttled enough to stay smooth on long answers. Each render: <code>DOMPurify.sanitize(marked.parse(raw))</code> + a trailing <code>&lt;span class="md-cursor"&gt;</code>.</p>
+          <h3>Final pass</h3>
+          <p>On <code>final</code> event, the cursor is removed and the canonical full-fidelity renderer (with hljs syntax highlighting on code blocks) runs once.</p>`
+      },
+      fa: {
+        title: "جریان زندهٔ مارک‌داون",
+        eyebrow: "تعامل",
+        sub: "پررنگ، کد، فهرست همراه با تایپ LLM رندر می‌شوند — نه پایان‌بافری.",
+        natural: `<p>UIهای چت دیگر جریان متن خام LLM را گرد می‌آورند و فقط در پایان رندر مارک‌داون را اجرا می‌کنند — ده ثانیه <code>**ستاره</code> خام می‌بینید و سپس ناگهان پررنگ می‌شود. اینجا رندر تقریباً ۳۰ بار در ثانیه با رسیدن توکن‌ها اجرا می‌شود. صفحه همان‌طور که می‌نویسد، خوانده می‌شود.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">marked.parse</span><span class="chip">DOMPurify</span><span class="chip">debounce ۳۳ms</span><span class="chip">md-cursor</span>
+          </div>
+          <h3>حلقه</h3>
+          <p>هندلر توکن به <code>els.bubble._rawText</code> الحاق می‌کند سپس <code>scheduleStreamingMdRender(els)</code> را فرامی‌خواند. debounce ۳۳ms حداکثر بازرندر را روی ~۳۰ در ثانیه نگه می‌دارد — کافی برای حس زنده، محدود برای روان ماندن روی پاسخ‌های بلند. هر رندر: <code>DOMPurify.sanitize(marked.parse(raw))</code> + یک <code>&lt;span class="md-cursor"&gt;</code> در انتها.</p>
+          <h3>گذر نهایی</h3>
+          <p>روی رویداد <code>final</code> مکان‌نما حذف و رندر کامل عینی (با هایلایت سینتکس hljs روی بلوک‌های کد) یک بار اجرا می‌شود.</p>`
+      }
+    },
+    "bilingual": {
+      en: {
+        title: "Bilingual mirror",
+        eyebrow: "Interact",
+        sub: "Farsi and English in one paragraph — read correctly, answered in your script.",
+        natural: `<p>Type a Farsi sentence and the bubble flips to right-to-left. Type an English question after, and it stays left-to-right. Mix both ("Mahmoud درباره چی می‌داند؟") and each chunk renders the right way without you flipping a switch. Every answer prompt now ends with a single instruction telling the LLM to match your language.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">dir="auto"</span><span class="chip">unicode-bidi: plaintext</span><span class="chip">Vazirmatn + Inter</span><span class="chip">per-prompt mirror rule</span>
+          </div>
+          <h3>Rendering</h3>
+          <p>Bubbles, inputs, clue textarea, and source rows all carry <code>dir="auto"</code>; the browser BiDi algorithm picks direction per first strong character. Paragraphs use <code>unicode-bidi: plaintext</code> so a mixed sentence resolves correctly per paragraph. Code blocks, scores, and trace steps are locked LTR.</p>
+          <h3>Fonts</h3>
+          <p>Inter for Latin, Vazirmatn for Persian/Arabic — both loaded via Google Fonts; system fallbacks (Tahoma, IRANYekan, Segoe UI) keep it working offline.</p>
+          <h3>Prompt rule</h3>
+          <p>Every answer prompt now ends with: <em>"Match the user's language. If they asked in Farsi, reply in Farsi. If in English, reply in English. If they mixed both, mirror the same mix."</em></p>`
+      },
+      fa: {
+        title: "آینهٔ دوزبانه",
+        eyebrow: "تعامل",
+        sub: "فارسی و انگلیسی در یک پاراگراف — درست خوانده، با خط شما پاسخ داده می‌شود.",
+        natural: `<p>یک جمله فارسی تایپ کنید و حباب راست‌چین می‌شود. پرسش انگلیسی بعد بنویسید، چپ‌چین می‌ماند. دو را در هم بیامیزید («Mahmoud درباره چی می‌داند؟») و هر تکه بدون کلید زدن درست رندر می‌شود. هر پرامپت پاسخ اکنون با یک دستور به LLM پایان می‌یابد که با زبان شما هم‌قدم شود.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">dir="auto"</span><span class="chip">unicode-bidi: plaintext</span><span class="chip">Vazirmatn + Inter</span><span class="chip">قانون آینه به‌ازای پرامپت</span>
+          </div>
+          <h3>رندر</h3>
+          <p>حباب‌ها، ورودی‌ها، textarea سرنخ و سطرهای منبع همگی <code>dir="auto"</code> دارند؛ الگوریتم BiDi مرورگر جهت را بر اساس اولین کاراکتر قوی انتخاب می‌کند. پاراگراف‌ها از <code>unicode-bidi: plaintext</code> استفاده می‌کنند تا جملهٔ آمیخته به‌ازای پاراگراف درست resolve شود. بلوک‌های کد، امتیازها و گام‌های رد روی LTR قفل‌اند.</p>
+          <h3>فونت‌ها</h3>
+          <p>Inter برای لاتین، Vazirmatn برای فارسی/عربی — هر دو از Google Fonts بارگذاری می‌شوند؛ fallbackهای سیستم (Tahoma، IRANYekan، Segoe UI) آفلاین کار را نگه می‌دارند.</p>
+          <h3>قانون پرامپت</h3>
+          <p>هر پرامپت پاسخ اکنون با این پایان می‌یابد: <em>«با زبان کاربر هم‌قدم شو. اگر فارسی پرسید، فارسی پاسخ بده. اگر انگلیسی، انگلیسی. اگر آمیخت، همان آمیزه را آینه کن.»</em></p>`
+      }
+    },
+    "followups": {
+      en: {
+        title: "Smart follow-ups",
+        eyebrow: "Interact",
+        sub: "Three clickable next-questions that pick up where the answer ended.",
+        natural: `<p>After every answer, the bot suggests three short follow-up questions — things you'd naturally ask next given what was just said. One click sends the question; you don't retype.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">prompts/followups.md</span><span class="chip">SSE followups event</span><span class="chip">interaction.followups_enabled</span>
+          </div>
+          <h3>Trigger</h3>
+          <p>After the main <code>generate</code> event, if <code>cfg.interaction.followups_enabled=true</code>, one extra LLM call runs against <code>prompts/followups.md</code> with the question and answer. The output is split on newlines, stripped of bullet/numeric prefixes, capped at 3 items, and emitted as a <code>followups</code> SSE event.</p>
+          <h3>Render</h3>
+          <p>Three chips appear under the assistant bubble. Click → fills the composer + auto-submits.</p>`
+      },
+      fa: {
+        title: "پی‌گیری‌های هوشمند",
+        eyebrow: "تعامل",
+        sub: "سه پرسش بعدی کلیک‌پذیر که از پایان پاسخ ادامه می‌دهند.",
+        natural: `<p>پس از هر پاسخ، ربات سه پرسش پی‌گیر کوتاه پیشنهاد می‌دهد — چیزهایی که با توجه به آنچه گفته شد، طبیعتاً بعد می‌پرسید. یک کلیک پرسش را می‌فرستد؛ نیازی به تایپ مجدد نیست.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">prompts/followups.md</span><span class="chip">رویداد SSE followups</span><span class="chip">interaction.followups_enabled</span>
+          </div>
+          <h3>ماشه</h3>
+          <p>پس از رویداد اصلی <code>generate</code>، اگر <code>cfg.interaction.followups_enabled=true</code> باشد، یک فراخوانی اضافی LLM روی <code>prompts/followups.md</code> با پرسش و پاسخ اجرا می‌شود. خروجی روی خط جدید بریده، پیشوندهای bullet/شماره حذف، حداکثر ۳ مورد و به‌صورت رویداد SSE <code>followups</code> منتشر می‌شود.</p>
+          <h3>رندر</h3>
+          <p>سه چیپ زیر حباب دستیار آشکار می‌شوند. کلیک ← composer پر و خودکار ارسال می‌شود.</p>`
+      }
+    },
+    "feedback": {
+      en: {
+        title: "Feedback loop",
+        eyebrow: "Interact",
+        sub: "Thumbs on every answer, ready to feed back into fine-tuning.",
+        natural: `<p>Every assistant message carries a 👍 and 👎 button. Your taps go into a feedback table; an analytics drawer shows ratios and surfaces the worst-rated turns so you can see what to improve.</p><p>One CLI command exports the labelled turns as JSONL — ready to use for downstream LLM fine-tuning.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">feedback table</span><span class="chip">POST/GET/DELETE /api/feedback</span><span class="chip">hrag export-training-pairs</span><span class="chip">feedback_summary()</span>
+          </div>
+          <h3>Storage</h3>
+          <p><code>feedback</code> table in SQLite: <code>message_id</code>, <code>rating</code> (<code>up</code> | <code>down</code>), optional <code>note</code>. One row per (message, user). Replay marks each assistant bubble with its existing rating on session restore.</p>
+          <h3>Analytics</h3>
+          <p><code>GET /api/feedback/stats</code> returns <code>{thumbs_up, thumbs_down, total, sessions, top_negative}</code> — used by the CLI command <code>hrag feedback-stats</code> and the GUI's Feedback drawer.</p>
+          <h3>Export</h3>
+          <p><code>hrag export-training-pairs --out pairs.jsonl --rating up</code> dumps thumbs-up turns as <code>{prompt, completion}</code> JSONL for downstream fine-tuning.</p>`
+      },
+      fa: {
+        title: "حلقهٔ بازخورد",
+        eyebrow: "تعامل",
+        sub: "شست روی هر پاسخ، آمادهٔ بازخورد به ریزتنظیم.",
+        natural: `<p>هر پیام دستیار دکمهٔ پسند و ناپسند دارد. ضربه‌های شما به جدول بازخورد می‌رود؛ کشوی تحلیلی نسبت‌ها را نشان می‌دهد و بدترین نوبت‌های امتیازخورده را آشکار می‌کند تا ببینید چه چیزی را بهبود دهید.</p><p>یک فرمان CLI نوبت‌های برچسب‌خورده را به JSONL خروجی می‌دهد — آمادهٔ ریزتنظیم بعدی LLM.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">جدول feedback</span><span class="chip">POST/GET/DELETE /api/feedback</span><span class="chip">hrag export-training-pairs</span><span class="chip">feedback_summary()</span>
+          </div>
+          <h3>ذخیره</h3>
+          <p>جدول <code>feedback</code> در SQLite: <code>message_id</code>، <code>rating</code> (<code>up</code> | <code>down</code>)، یادداشت اختیاری. یک ردیف به‌ازای (پیام، کاربر). بازپخش هر حباب دستیار را در بازیابی جلسه با امتیاز موجودش علامت می‌زند.</p>
+          <h3>تحلیل</h3>
+          <p><code>GET /api/feedback/stats</code> <code>{thumbs_up, thumbs_down, total, sessions, top_negative}</code> بازمی‌گرداند — مصرف توسط فرمان CLI <code>hrag feedback-stats</code> و کشوی Feedback در GUI.</p>
+          <h3>خروجی</h3>
+          <p><code>hrag export-training-pairs --out pairs.jsonl --rating up</code> نوبت‌های پسندیده را به‌صورت JSONL <code>{prompt, completion}</code> برای ریزتنظیم بعدی می‌ریزد.</p>`
+      }
+    },
+    "local": {
+      en: {
+        title: "Runs locally",
+        eyebrow: "Interact",
+        sub: "Your LLM, your embeddings, your database — nothing leaves your machine.",
+        natural: `<p>Everything runs on your computer. The language model talks through Ollama; embeddings are produced by sentence-transformers running on your CPU or GPU; documents and chunks sit in SQLite and ChromaDB inside your project folder. There is no SaaS call, no API key required for the default path.</p><p>If you'd rather use a cloud LLM (OpenAI, Anthropic), the provider abstraction supports that too — pick at config time.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">Ollama</span><span class="chip">sentence-transformers</span><span class="chip">SQLite</span><span class="chip">ChromaDB</span><span class="chip">FastAPI</span><span class="chip">optional: OpenAI / Anthropic / Neo4j</span>
+          </div>
+          <h3>Stack</h3>
+          <ul>
+            <li><strong>LLM</strong>: <code>OllamaProvider</code> (default) with <code>keep_alive</code> + <code>num_keep</code> for warm cross-turn cache. <code>OpenAIProvider</code> and <code>AnthropicProvider</code> available.</li>
+            <li><strong>Embeddings</strong>: sentence-transformers default (<code>all-mpnet-base-v2</code>); selector exposes Specter2, Jina v2, BGE for math/academic corpora.</li>
+            <li><strong>Vector store</strong>: ChromaDB default. <code>sqlite-vec</code> backend ships as a real implementation (~390 LOC, <code>vec0</code> virtual table).</li>
+            <li><strong>Knowledge graph</strong>: NetworkX default; Neo4j backend shipped (parameterized Cypher).</li>
+            <li><strong>Web</strong>: FastAPI + SPA (vanilla JS + D3.js v7) — no React build step.</li>
+          </ul>
+          <h3>Per-user plumbing</h3>
+          <p><code>user_id</code> is threaded through every table and every API even in single-user mode — adding multi-user later is a config change, not a refactor.</p>`
+      },
+      fa: {
+        title: "اجرای کاملاً محلی",
+        eyebrow: "تعامل",
+        sub: "LLM شما، embedding شما، پایگاه دادهٔ شما — هیچ چیز از دستگاهتان خارج نمی‌شود.",
+        natural: `<p>همه چیز روی رایانهٔ شما اجرا می‌شود. مدل زبان از طریق Ollama سخن می‌گوید؛ embedding توسط sentence-transformers روی CPU یا GPU شما تولید می‌شود؛ اسناد و قطعه‌ها در SQLite و ChromaDB درون پوشهٔ پروژه‌اند. هیچ فراخوانی SaaS و هیچ API key برای مسیر پیش‌فرض لازم نیست.</p><p>اگر LLM ابری ترجیح می‌دهید (OpenAI، Anthropic)، انتزاع provider آن را پشتیبانی می‌کند — هنگام پیکربندی برگزینید.</p>`,
+        technical: `
+          <div class="chips">
+            <span class="chip">Ollama</span><span class="chip">sentence-transformers</span><span class="chip">SQLite</span><span class="chip">ChromaDB</span><span class="chip">FastAPI</span><span class="chip">اختیاری: OpenAI / Anthropic / Neo4j</span>
+          </div>
+          <h3>پشته</h3>
+          <ul>
+            <li><strong>LLM</strong>: <code>OllamaProvider</code> (پیش‌فرض) با <code>keep_alive</code> + <code>num_keep</code> برای کش گرم میان‌نوبتی. <code>OpenAIProvider</code> و <code>AnthropicProvider</code> در دسترس.</li>
+            <li><strong>Embedding</strong>: پیش‌فرض sentence-transformers (<code>all-mpnet-base-v2</code>)؛ انتخاب‌کننده Specter2، Jina v2، BGE برای پیکرهٔ ریاضی/علمی را آشکار می‌کند.</li>
+            <li><strong>ذخیرهٔ بُرداری</strong>: پیش‌فرض ChromaDB. پشتیبان <code>sqlite-vec</code> به‌صورت واقعی (~۳۹۰ خط، جدول مجازی <code>vec0</code>) عرضه شده.</li>
+            <li><strong>گراف دانش</strong>: NetworkX پیش‌فرض؛ پشتیبان Neo4j عرضه شده (Cypher پارامتری).</li>
+            <li><strong>وب</strong>: FastAPI + SPA (JS و D3.js v7 خالص) — بدون مرحلهٔ build برای React.</li>
+          </ul>
+          <h3>لوله‌کشی به‌ازای کاربر</h3>
+          <p><code>user_id</code> از طریق هر جدول و هر API حتی در حالت تک‌کاربره عبور می‌کند — افزودن چندکاربره بعداً تغییر پیکربندی است، نه refactor.</p>`
+      }
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  let activeId = null;
+  let activeTab = "natural";
+
+  function selectCap(id) {
+    activeId = id;
+    $$(".cap").forEach(c => c.classList.toggle("active", c.dataset.id === id));
+    renderPanel(id);
+  }
+
+  function renderPanel(id) {
+    const en = CONTENT[id] && CONTENT[id].en;
+    const fa = CONTENT[id] && CONTENT[id].fa;
+    if (!en || !fa) return;
+    $("#panel-empty").hidden = true;
+    $("#panel-real").hidden = false;
+    $("#panel-tabs").hidden = false;
+
+    // Eyebrow: layer label, EN + FA inline
+    $("#panel-eyebrow").innerHTML =
+      `<span class="eb-en">${en.eyebrow}</span><span class="eb-fa">${fa.eyebrow}</span>`;
+
+    // Title: EN + FA stacked
+    $("#panel-title").innerHTML =
+      `<span class="pt-en">${en.title}</span><span class="pt-fa">${fa.title}</span>`;
+
+    // Subtitle: EN + FA stacked
+    $("#panel-sub").innerHTML =
+      `<span class="ps-en">${en.sub}</span><span class="ps-fa">${fa.sub}</span>`;
+
+    // Body: each section renders BOTH EN and FA as separate visual blocks
+    const renderSection = (enHtml, faHtml) => `
+      <div class="lang-block lang-block-en" lang="en" dir="ltr">
+        <span class="lang-block-tag">English</span>
+        ${enHtml}
+      </div>
+      <div class="lang-block lang-block-fa" lang="fa" dir="rtl">
+        <span class="lang-block-tag">فارسی</span>
+        ${faHtml}
+      </div>`;
+
+    const naturalHtml = renderSection(en.natural || "", fa.natural || "");
+    const techHtml    = renderSection(en.technical || "", fa.technical || "");
+
+    $("#panel-body").innerHTML = `
+      <div class="panel-section ${activeTab === "natural" ? "active" : ""}" id="sec-natural">${naturalHtml}</div>
+      <div class="panel-section ${activeTab === "technical" ? "active" : ""}" id="sec-technical">${techHtml}</div>`;
+
+    // Re-bind tab click handlers (panel-body is replaced wholesale)
+    $$(".panel-tab").forEach(t => {
+      t.classList.toggle("active", t.dataset.tab === activeTab);
+      t.onclick = () => {
+        activeTab = t.dataset.tab;
+        $$(".panel-tab").forEach(x => x.classList.toggle("active", x === t));
+        $$(".panel-section").forEach(s => s.classList.remove("active"));
+        const target = (activeTab === "natural") ? "#sec-natural" : "#sec-technical";
+        $(target).classList.add("active");
+      };
+    });
+  }
+
+  // Draw subtle connector arrows between layer rows. Pure SVG — pulses with the
+  // dashed CSS animation. Recomputes on resize.
+  function drawArrows() {
+    $$(".cap-arrows").forEach(row => {
+      const w = row.clientWidth;
+      const h = row.clientHeight;
+      const n = 7;
+      const xs = Array.from({length: n}, (_, i) => Math.round((i + 1) / (n + 1) * w));
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none" viewBox="0 0 ${w} ${h}">
+        ${xs.map(x => `
+          <path class="cap-arrow-line" d="M ${x} 0 L ${x} ${h - 4}"/>
+          <polygon class="cap-arrow-tip" points="${x-3},${h-6} ${x+3},${h-6} ${x},${h}"/>
+        `).join("")}
+      </svg>`;
+      row.innerHTML = svg;
+    });
+  }
+
+  // Subtle hover preview: hovering a cap card briefly highlights the panel title
+  // so the user gets a hint of what they'll see on click. Optional polish.
+  function bindCards() {
+    $$(".cap").forEach(c => {
+      c.addEventListener("click", () => selectCap(c.dataset.id));
+      c.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          selectCap(c.dataset.id);
+        }
+      });
+    });
+  }
+
+  // Init
+  document.addEventListener("DOMContentLoaded", () => {
+    bindCards();
+    drawArrows();
+    window.addEventListener("resize", drawArrows);
+    // Pre-select the first cap so the panel isn't empty on load.
+    setTimeout(() => selectCap("ingest"), 200);
+  });
+</script>
+
+</body>
+</html>

@@ -111,6 +111,12 @@
         </button>
       </header>
 
+      <!-- SOTA per-file ingest progress drawer.
+           Populated by trackJob() / pollJobLoop() in app.js. Floats bottom-
+           right; vertical stack of .job-card elements; hidden when no
+           active job. -->
+      <div class="job-drawer" id="job-drawer" hidden></div>
+
       <!-- Message scroll area -->
       <div class="scroll" id="scroll">
         <div class="messages" id="messages">
@@ -183,6 +189,10 @@
           <button class="primary" id="rem-modal-save" type="button">Save selected</button>
         </div>
       </div>
+
+      <!-- ===== Phase 8: inline review card is rendered dynamically inside the
+           active assistant message wrap (see app.js::renderReviewCard). No
+           modal markup lives here. ===== -->
     </main>
 
     <!-- ===== Settings drawer ===== -->
@@ -455,6 +465,14 @@
               <b>Drop files</b> here, or <button type="button" class="link-btn" id="upload-browse">browse</button>
               <div class="upload-hint">PDF, DOCX, MD, TXT</div>
             </div>
+          </div>
+          <!-- Manual vs auto taxonomy choice. Read by handleUploadFiles() in
+               app.js when files are picked. Sent as ?taxonomy_mode= on POST
+               /api/ingest. -->
+          <div class="upload-taxonomy-choice" id="upload-taxonomy-choice">
+            <span class="upload-taxonomy-label">Place new docs in the taxonomy:</span>
+            <label><input type="radio" name="taxmode" value="auto" checked> Auto</label>
+            <label><input type="radio" name="taxmode" value="manual"> Manually (I'll drag them onto a node)</label>
           </div>
           <div id="upload-progress" class="upload-progress"></div>
         </div>

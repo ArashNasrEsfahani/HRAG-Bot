@@ -172,6 +172,104 @@ _BOOT_GOLDEN: tuple[tuple[str, Intent], ...] = (
 
 
 # ---------------------------------------------------------------------------
+# Phase 8.3 — entity extraction + history rendering helpers
+# ---------------------------------------------------------------------------
+
+# Loose proper-noun token detector. Matches:
+#   - ASCII capitalised tokens (Mahmoud, NAACL, Arash) of 2+ chars
+#   - All-Unicode-letter "words" of length >= 3 that are NOT in the common
+#     English stop-list below. This captures Farsi/Persian names like
+#     "محمود" that have no case distinction.
+# We're intentionally permissive: false positives in the tracker are
+# inert (the follow-up fast path only fires when the user message ALSO
+# contains the same token).
+_RE_PROPER_NOUN_ASCII = re.compile(r"\b[A-Z][A-Za-z'\-]{1,}\b")
+_RE_WORD_UNICODE = re.compile(r"[^\W\d_]{3,}", flags=re.UNICODE)
+
+_ENTITY_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # Pronouns, articles, common verbs that frequently appear capitalised
+        # at sentence start.
+        "the", "a", "an", "and", "or", "but", "if", "then", "than", "that",
+        "this", "these", "those", "is", "are", "was", "were", "be", "been",
+        "being", "do", "does", "did", "have", "has", "had", "i", "you",
+        "he", "she", "we", "they", "it", "me", "my", "your", "his", "her",
+        "our", "their", "its", "yes", "no", "ok", "okay", "yeah", "yep",
+        "to", "of", "in", "on", "at", "by", "for", "with", "from", "as",
+        "user", "assistant", "source", "untitled", "section",
+        # Source-formatter words from _format_passages.
+        "n/a",
+    }
+)
+
+# Per-session entity-tracker cap. Keeps the in-memory dict tiny under heavy
+# multi-turn use; evicts oldest entries first when exceeded.
+ENTITY_TRACKER_CAP: int = 50
+
+
+def extract_entities(text: str) -> set[str]:
+    """Extract candidate proper-noun entities from *text*.
+
+    Pure function — no LLM, no I/O. Used by the orchestrator to build the
+    follow-up entity tracker from the text of retrieved episodic memories.
+    """
+    if not text:
+        return set()
+    out: set[str] = set()
+    # ASCII proper nouns.
+    for tok in _RE_PROPER_NOUN_ASCII.findall(text):
+        low = tok.lower()
+        if low in _ENTITY_STOPWORDS:
+            continue
+        out.add(tok)
+    # Unicode words (Persian, Arabic, etc. — no case marker available).
+    for tok in _RE_WORD_UNICODE.findall(text):
+        # Skip if it's already a pure-ASCII English stopword captured by
+        # the first pass; lowercased compare.
+        if tok.lower() in _ENTITY_STOPWORDS:
+            continue
+        # Skip pure-ASCII tokens that lack a leading uppercase letter — they
+        # are common words like "remember", "memory" that aren't entities.
+        # Tokens with a non-ASCII codepoint pass (Persian / CJK / etc.).
+        if tok.isascii() and not tok[:1].isupper():
+            continue
+        out.add(tok)
+    return out
+
+
+def _mentions_entity(query: str, entities: set[str]) -> bool:
+    """Case-insensitive substring check: does *query* mention any *entity*?"""
+    if not query or not entities:
+        return False
+    q_lower = query.lower()
+    for ent in entities:
+        if not ent:
+            continue
+        if ent.lower() in q_lower:
+            return True
+    return False
+
+
+def _render_history_block(history: Optional[list[tuple[str, str]]]) -> str:
+    """Render the last 2 exchanges into a compact prompt block.
+
+    Returns ``"(no prior conversation)"`` when *history* is empty. Each
+    message is truncated to 200 chars so the prompt stays small.
+    """
+    if not history:
+        return "(no prior conversation)"
+    recent = history[-4:]  # 2 user / assistant exchanges
+    lines: list[str] = []
+    for role, content in recent:
+        label = "User" if role == "user" else "Assistant"
+        text = (content or "").replace("\n", " ").strip()
+        if len(text) > 200:
+            text = text[:200] + "…"
+        lines.append(f"{label}: {text}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Normalizer (pure function, no side-effects)
 # ---------------------------------------------------------------------------
 
@@ -238,7 +336,14 @@ class IntentClassifier:
     # Public API
     # ------------------------------------------------------------------
 
-    def classify(self, query: str) -> IntentVerdict:
+    def classify(
+        self,
+        query: str,
+        *,
+        history: Optional[list[tuple[str, str]]] = None,
+        prev_intent: Optional[Intent] = None,
+        prev_memory_entities: Optional[set[str]] = None,
+    ) -> IntentVerdict:
         """Classify *query* and return an :class:`IntentVerdict`.
 
         Fast path runs FIRST and is NEVER cached — that guarantees a source
@@ -246,6 +351,16 @@ class IntentClassifier:
         on the next message. Only the LLM path's result is cached, and the
         cache is version-stamped so it self-invalidates when the prompt
         template or vocab sets change between releases.
+
+        Phase 8.3 — when *prev_intent* is PERSONAL and *prev_memory_entities*
+        contains a token that the current message mentions, short-circuit to
+        PERSONAL via a pre-LLM fast path. This handles the common follow-up
+        ("what about Mahmoud?" right after a PERSONAL turn that surfaced
+        Mahmoud) without paying for an LLM call.
+
+        Phase 8.3 — the LLM path is also fed up to the last 2 user/assistant
+        exchanges via *history* so the prompt-side rules ("follow-up about a
+        person already framed as personal") can apply.
         """
         normalized = _normalize(query)
 
@@ -259,8 +374,38 @@ class IntentClassifier:
             )
             return verdict
 
+        # 1b. Phase 8.3 — follow-up entity fast path. When the previous turn
+        # was PERSONAL and the user's current message mentions any entity
+        # the previous PERSONAL turn surfaced from memory, this is a
+        # continuation of the personal thread. No LLM call.
+        if (
+            prev_intent == Intent.PERSONAL
+            and prev_memory_entities
+            and _mentions_entity(query, prev_memory_entities)
+        ):
+            verdict = IntentVerdict(
+                intent=Intent.PERSONAL,
+                confidence=0.9,
+                source="follow_up_entity",
+                raw_label=None,
+            )
+            logger.info(
+                "intent verdict: query=%r intent=%s confidence=%.2f source=%s "
+                "cached=False (entity follow-up)",
+                query[:80], verdict.intent.value, verdict.confidence, verdict.source,
+            )
+            return verdict
+
         # 2. Versioned LLM cache lookup (drop stale-version entries).
-        cached_entry = self._cache.get(normalized)
+        # Cache key includes a compact history fingerprint so the same query
+        # at different points in the conversation does not collide.
+        cache_key = normalized
+        if history:
+            # Last 2 exchanges = up to 4 messages. Cheap content hash.
+            recent = history[-4:]
+            hist_sig = "||".join(f"{r}:{c[:40]}" for r, c in recent)
+            cache_key = normalized + "@@" + hashlib.sha1(hist_sig.encode("utf-8")).hexdigest()[:8]
+        cached_entry = self._cache.get(cache_key)
         if cached_entry is not None and cached_entry[1] == self._cache_version:
             cached_verdict = cached_entry[0]
             logger.info(
@@ -276,10 +421,10 @@ class IntentClassifier:
         if self._fast_only:
             verdict = IntentVerdict(Intent.UNCLEAR, 0.3, "fast_path", None)
         else:
-            verdict = self._llm_classify(query, normalized)
+            verdict = self._llm_classify(query, normalized, history=history)
 
         # 4. Cache the slow-path verdict with the current version stamp.
-        self._cache[normalized] = (verdict, self._cache_version)
+        self._cache[cache_key] = (verdict, self._cache_version)
         logger.info(
             "intent verdict: query=%r intent=%s confidence=%.2f source=%s "
             "cached=False cache_version=%s",
@@ -345,7 +490,13 @@ class IntentClassifier:
     # LLM fallback
     # ------------------------------------------------------------------
 
-    def _llm_classify(self, query: str, normalized: str) -> IntentVerdict:
+    def _llm_classify(
+        self,
+        query: str,
+        normalized: str,
+        *,
+        history: Optional[list[tuple[str, str]]] = None,
+    ) -> IntentVerdict:
         """Call the LLM and parse a single intent label from its output."""
         try:
             # The query may carry embedded newlines if upstream stitched a
@@ -356,7 +507,18 @@ class IntentClassifier:
             flat_query = " | ".join(
                 line.strip() for line in query.split("\n") if line.strip()
             )
-            prompt = self._template.format(query=flat_query)
+            # Render the last 2 exchanges (up to 4 messages) into the prompt
+            # so a follow-up like "what about Mahmoud?" inherits the prior
+            # personal framing.
+            history_block = _render_history_block(history)
+            try:
+                prompt = self._template.format(
+                    query=flat_query, conversation_history=history_block,
+                )
+            except (KeyError, IndexError):
+                # Backwards-compat path for any custom template without the
+                # new {conversation_history} slot.
+                prompt = self._template.format(query=flat_query)
             raw: str = self._llm.complete(prompt, temperature=0.0, max_tokens=self._max_tokens)  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001
             logger.warning(

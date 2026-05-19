@@ -35,6 +35,8 @@ Each passage is prefixed with a header of the form:
 
 ### Instructions
 
+- Match the user's language. If they asked in Farsi (Persian), reply in Farsi. If in English, reply in English. If they mixed both in one question, mirror the same mix.
+
 **Step 1 — Identify relevant evidence.**
 For every fact you use, copy the verbatim text that supports it inside quote
 markers:

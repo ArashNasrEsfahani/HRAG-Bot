@@ -25,6 +25,7 @@ Phase 4 notes (compaction & gating, all OFF by default):
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
 import time
@@ -66,6 +67,7 @@ from hrag.gating.gate import RAGate
 from hrag.gating.uncertain import render_uncertain, strip_uncertain
 from hrag.ingest.pipeline import IngestPipeline
 from hrag.intent import Intent, IntentClassifier, IntentVerdict
+from hrag.interaction import InteractionStore, ReviewDecision, maybe_pause
 from hrag.prompts_registry import PromptRegistry
 from hrag.providers.embeddings import get_embedding_provider
 from hrag.providers.llm import get_llm_provider
@@ -385,6 +387,36 @@ class Orchestrator:
             else None
         )
 
+        # Phase 8 — interactive review store. Shared with the /resume HTTP
+        # endpoint so the orchestrator thread (blocked on
+        # ``wait_for_decision``) and the web thread (calling
+        # ``submit_decision``) talk through the same in-memory pending-turn
+        # registry. Always created — gating happens inside
+        # :func:`maybe_pause` via ``cfg.interaction.review_enabled``, so the
+        # zero-overhead default-off contract is preserved by the callee.
+        self.interaction_store: InteractionStore = InteractionStore(
+            ttl_s=float(config.interaction.review_timeout_s) + 30.0,
+            reap_interval_s=30.0,
+        )
+
+        # Phase 8.3 — per-session "what was the previous turn's intent /
+        # what entities did its memories surface" tracker. Keyed by
+        # session_id. Used by the intent classifier's follow-up fast path:
+        # when the previous turn was PERSONAL and the new message mentions
+        # any tracked entity (e.g. "Mahmoud"), we short-circuit to PERSONAL
+        # without an LLM call. The dict is bounded per-session and the
+        # whole tracker is process-local — fine for a single-user Streamlit
+        # / FastAPI process. Persistence across restarts is intentionally
+        # NOT provided: the entities will be re-extracted from retrieved
+        # memories on the first PERSONAL turn after a restart.
+        from hrag.intent import ENTITY_TRACKER_CAP as _ENTITY_CAP  # noqa: PLC0415
+
+        self._entity_cap: int = _ENTITY_CAP
+        self._session_last_intent: dict[str, Intent] = {}
+        # OrderedDict-of-entities per session (oldest-first iteration).
+        # Stored as list so we can pop from the head when over cap.
+        self._session_memory_entities: dict[str, list[str]] = {}
+
         # Boot self-test: exercise the classifier's fast-path against a
         # golden set ("what is hipporag" → FACTUAL, "what's my name" →
         # PERSONAL, …). Mismatches are surfaced as one logger.warning line
@@ -492,7 +524,12 @@ class Orchestrator:
                 except Exception:
                     pass  # never let UI errors break the pipeline
 
-        _emit("start", {"question": question})
+        # Phase 8 — allocate the turn_id up front. Surfaced on the ``start``
+        # event so the frontend can wire ``/api/chat/turns/{id}/resume``
+        # before any review_required event might fire.
+        turn_id = uuid.uuid4().hex
+
+        _emit("start", {"question": question, "turn_id": turn_id})
 
         # 1. Ensure the user exists; create session row if needed.
         self.db.ensure_user(user_id)
@@ -595,7 +632,21 @@ class Orchestrator:
                     question[:80], sorted(matched_topics),
                 )
             else:
-                verdict = self.intent_classifier.classify(classifier_input)
+                # Phase 8.3 — feed the last 2 exchanges into the LLM prompt
+                # so it can recognise a personal follow-up, AND pass the
+                # previous turn's intent + memory entities so the
+                # follow-up entity fast path can short-circuit without
+                # an LLM call.
+                prev_intent_for_session = self._session_last_intent.get(session_id)
+                prev_entities_for_session: set[str] = set(
+                    self._session_memory_entities.get(session_id, [])
+                )
+                verdict = self.intent_classifier.classify(
+                    classifier_input,
+                    history=history_rows,
+                    prev_intent=prev_intent_for_session,
+                    prev_memory_entities=prev_entities_for_session,
+                )
         else:
             # Disabled-by-config emergency bypass: treat everything as factual.
             verdict = IntentVerdict(
@@ -682,6 +733,15 @@ class Orchestrator:
         # looks like, in source-document vocabulary. The original `question`
         # is preserved for the answer prompt (the LLM answers what the user
         # actually asked, not the hypothesis).
+        # Phase 8 — captured so the interactive review pause can surface them
+        # in the modal payload. ``router_label_so_far`` is the most recent
+        # value emitted on ``router_classify`` (None when no router was in
+        # the chain). ``last_descend_payload`` mirrors the taxonomy_descend
+        # event payload (None when no taxonomy retriever ran).
+        router_label_so_far: Optional[str] = None
+        last_descend_payload: Optional[dict] = None
+        clue_text: Optional[str] = None  # surfaced in the review payload
+
         if (
             self.clue is not None
             and intent == Intent.FACTUAL
@@ -728,19 +788,22 @@ class Orchestrator:
             # see which retrieval path the query took. Classification is cached
             # on the router so the actual retrieve() call below won't re-run it.
             # Walk through wrappers (e.g. DocScopedRetriever) to find the router.
-            if progress:
-                inner = active_retriever
-                for _ in range(4):  # bounded walk; avoid infinite loop on cycles
-                    if getattr(inner, "name", "") == "router":
-                        break
-                    inner = getattr(inner, "wrapped", None) or getattr(inner, "inner", None)
-                    if inner is None:
-                        break
-                if inner is not None and getattr(inner, "name", "") == "router":
-                    try:
-                        label = inner.classify(retrieval_query)
-                    except Exception:  # noqa: BLE001
-                        label = "unknown"
+            # Phase 8: also capture the label on ``router_label_so_far`` so the
+            # interactive review modal can surface ROUTER_AMBIGUOUS.
+            inner = active_retriever
+            for _ in range(4):  # bounded walk; avoid infinite loop on cycles
+                if getattr(inner, "name", "") == "router":
+                    break
+                inner = getattr(inner, "wrapped", None) or getattr(inner, "inner", None)
+                if inner is None:
+                    break
+            if inner is not None and getattr(inner, "name", "") == "router":
+                try:
+                    label = inner.classify(retrieval_query)
+                except Exception:  # noqa: BLE001
+                    label = "unknown"
+                router_label_so_far = label
+                if progress:
                     _emit("router_classify", {"label": label, "query": retrieval_query})
 
             t0 = time.time()
@@ -769,10 +832,26 @@ class Orchestrator:
                     "where": where_filter,
                 })
 
+            # Phase 8.1 — memories must always be findable on FACTUAL turns too.
+            # For the "full" scope, plan.source_types is None (no filter), but
+            # some retrievers (e.g. TaxonomyRetriever) scope to documents picked
+            # by the tree and miss episodic memories. Pass an explicit
+            # ["document", "episodic"] list so retrievers that DO honour the
+            # filter see both pools. Retrievers that ignore source_types (or
+            # only filter chunks they would have returned anyway) keep their
+            # previous behaviour.
+            full_source_types = plan.source_types
+            if getattr(cfg.retrieval, "always_include_episodic", True):
+                if isinstance(full_source_types, (list, tuple)) and "episodic" not in full_source_types:
+                    full_source_types = list(full_source_types) + ["episodic"]
+                elif full_source_types is None:
+                    full_source_types = ["document", "episodic"]
+
             results = active_retriever.retrieve(
                 retrieval_query,
                 user_id,
                 top_k=full_vec_k,
+                source_types=full_source_types,
                 intent_hint=intent,
                 where=where_filter,
             )
@@ -786,24 +865,28 @@ class Orchestrator:
                     retrieval_query,
                     user_id,
                     top_k=full_vec_k,
+                    source_types=full_source_types,
                     intent_hint=intent,
                 )
 
             # If a TaxonomyRetriever is in the chain, surface its descend trace
             # so the GUI can render the tree-navigation visual.
-            if progress is not None:
-                tx = active_retriever
-                for _ in range(4):  # walk through wrappers
-                    if getattr(tx, "name", "") == "taxonomy":
-                        break
-                    tx = getattr(tx, "wrapped", None) or getattr(tx, "inner", None)
-                    if tx is None:
-                        break
-                if tx is not None and getattr(tx, "name", "") == "taxonomy":
-                    try:
-                        _emit("taxonomy_descend", tx.describe_last_descend(user_id))
-                    except Exception:  # noqa: BLE001
-                        pass
+            # Phase 8: also stash the payload on ``last_descend_payload`` so
+            # the review modal can fire BRANCH_THRESHOLD.
+            tx = active_retriever
+            for _ in range(4):  # walk through wrappers
+                if getattr(tx, "name", "") == "taxonomy":
+                    break
+                tx = getattr(tx, "wrapped", None) or getattr(tx, "inner", None)
+                if tx is None:
+                    break
+            if tx is not None and getattr(tx, "name", "") == "taxonomy":
+                try:
+                    last_descend_payload = tx.describe_last_descend(user_id)
+                except Exception:  # noqa: BLE001
+                    last_descend_payload = None
+                if progress is not None and last_descend_payload is not None:
+                    _emit("taxonomy_descend", last_descend_payload)
 
             _emit(
                 "retrieve",
@@ -906,7 +989,19 @@ class Orchestrator:
                 and intent == Intent.PERSONAL
             )
             if episodic_bias_on:
+                # Pre-existing Phase 6 behaviour: hard-override to both pools.
                 source_types = ["document", "episodic"]
+
+            # Phase 8.1 — memories must always be findable, not only on PERSONAL turns.
+            # Always include "episodic" in source_types unless explicitly disabled.
+            # Episodic chunks will compete with documents on relevance; for PERSONAL
+            # turns the stable sort below still lifts them to the top.
+            include_episodic_always = getattr(cfg.retrieval, "always_include_episodic", True)
+            if include_episodic_always:
+                if isinstance(source_types, (list, tuple)) and "episodic" not in source_types:
+                    source_types = list(source_types) + ["episodic"]
+                elif source_types is None:
+                    source_types = ["document", "episodic"]
 
             try:
                 results = active_retriever.retrieve(
@@ -958,11 +1053,242 @@ class Orchestrator:
         # prompt template does not consume {retrieved_passages}, so we leave
         # `results` empty and proceed straight to generation.
 
+        # --------------------------------------------------------------
+        # 3d-iii. Phase 8 — interactive review pause.
+        # --------------------------------------------------------------
+        # Sits between retrieval/organize and the FACTUAL→GENERAL swap.
+        # When ``cfg.interaction.review_enabled`` is False, ``maybe_pause``
+        # short-circuits to ``ReviewDecision(action="continue")`` with zero
+        # side effects — preserves the default-off contract.
+        #
+        # The pause is BEFORE the swap so the user gets a chance to act on
+        # the same weak signal that would normally drive the swap.
+        review_decision: ReviewDecision = ReviewDecision(action="continue")
+        review_persistence: Optional[dict[str, Any]] = None
+
+        if cfg.interaction.review_enabled and intent != Intent.GREETING:
+            # Compute the "swap imminent" flag without actually performing
+            # the swap — the user decides first.
+            factual_general_swap_imminent = False
+            if intent == Intent.FACTUAL:
+                floor_imminent = float(cfg.intent.corpus_relevance_floor)
+                top_score_imminent = max((r.score for r in results), default=0.0)
+                if not results or (floor_imminent > 0.0 and top_score_imminent < floor_imminent):
+                    factual_general_swap_imminent = True
+
+            review_decision = maybe_pause(
+                cfg=cfg.interaction,
+                results=results,
+                descend=last_descend_payload,
+                intent_verdict=verdict,
+                router_label=router_label_so_far,
+                factual_general_swap_imminent=factual_general_swap_imminent,
+                clue=clue_text,
+                question=question,
+                retrieval_query=retrieval_query,
+                user_id=user_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                progress=progress,
+                store=self.interaction_store,
+                llm=self.llm,
+            )
+
+            # If the decision carries non-empty reasons, a real pause happened
+            # — stash a structured payload for the messages.metadata column.
+            if review_decision.reasons:
+                review_persistence = {
+                    "phase8": {
+                        "turn_id": turn_id,
+                        "action": review_decision.action,
+                        "reasons": list(review_decision.reasons),
+                        "timed_out": bool(review_decision.timed_out),
+                        "selected_chunk_ids": list(review_decision.selected_chunk_ids),
+                        "rewritten_query": review_decision.rewritten_query,
+                        "expand_from_doc_id": review_decision.expand_from_doc_id,
+                        "redirect_taxonomy_node_id": review_decision.redirect_taxonomy_node_id,
+                        "include_episodic": bool(review_decision.include_episodic),
+                    }
+                }
+
+            # Apply the decision before prompt rendering.
+            if review_decision.action == "abort":
+                _emit("done", {
+                    "total_s": time.time() - t_start,
+                    "aborted_by_user": True,
+                })
+                # Persist a marker assistant message so session replay
+                # surfaces the abort point.
+                aborted_text = "_(Turn aborted by user during review.)_"
+                meta_json: Optional[str] = None
+                if cfg.interaction.persistence_enabled and review_persistence is not None:
+                    try:
+                        meta_json = json.dumps(review_persistence)
+                    except Exception:  # noqa: BLE001
+                        meta_json = None
+                self._save_message(
+                    session_id, user_id, "assistant", aborted_text,
+                    metadata=meta_json,
+                )
+                self.db.commit()
+                return ChatResult(
+                    answer=aborted_text,
+                    session_id=session_id,
+                    sources=[],
+                    prompt="",
+                )
+
+            if review_decision.action == "general":
+                # User opted out of corpus retrieval; answer from general
+                # knowledge instead.
+                intent = Intent.GENERAL
+                results = []
+                plan = dataclasses.replace(plan, scope="none")
+
+            elif review_decision.action == "filter" and review_decision.selected_chunk_ids:
+                selected = set(review_decision.selected_chunk_ids)
+                results = [r for r in results if r.chunk.chunk_id in selected]
+
+            elif review_decision.action == "rephrase" and review_decision.rewritten_query:
+                retrieval_query = review_decision.rewritten_query
+                try:
+                    active_retriever = self._pick_retriever_for_intent(intent)
+                    results = active_retriever.retrieve(
+                        retrieval_query,
+                        user_id,
+                        top_k=cfg.retrieval.top_k_final,
+                        intent_hint=intent,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Phase 8 rephrase: re-retrieval failed")
+                    results = []
+
+            elif review_decision.action == "clarify":
+                # Generate a clarifying question and return it as the assistant
+                # answer. Subsequent user turns will pick up the clarification.
+                try:
+                    clarify_template = (
+                        Path(__file__).parent / "prompts" / "clarify.md"
+                    ).read_text(encoding="utf-8")
+                    clarify_prompt = clarify_template.format(
+                        question=question,
+                        clue=clue_text or "",
+                    )
+                    clarify_answer = self.llm.complete(
+                        clarify_prompt,
+                        temperature=0.3,
+                        max_tokens=120,
+                    ).strip()
+                except Exception:  # noqa: BLE001
+                    logger.exception("Phase 8 clarify: LLM call failed")
+                    clarify_answer = "Could you tell me a bit more about what you mean?"
+                if not clarify_answer:
+                    clarify_answer = "Could you tell me a bit more about what you mean?"
+
+                meta_json = None
+                if cfg.interaction.persistence_enabled and review_persistence is not None:
+                    try:
+                        meta_json = json.dumps(review_persistence)
+                    except Exception:  # noqa: BLE001
+                        meta_json = None
+                self._save_message(
+                    session_id, user_id, "assistant", clarify_answer,
+                    metadata=meta_json,
+                )
+                self.db.commit()
+                _emit("done", {
+                    "total_s": time.time() - t_start,
+                    "action": "clarify",
+                })
+                return ChatResult(
+                    answer=clarify_answer,
+                    session_id=session_id,
+                    sources=results,
+                    prompt="",
+                )
+
+            elif review_decision.action == "expand_doc" and review_decision.expand_from_doc_id:
+                try:
+                    from hrag.retrieval.doc_scope import DocScopedRetriever
+                    scoped = DocScopedRetriever(
+                        wrapped=self.retriever,
+                        db=self.db,
+                        embedder=self.embedder,
+                    )
+                    # DocScopedRetriever doesn't accept a hard doc_id —
+                    # use a transient alias map.
+                    scoped._aliases = {review_decision.expand_from_doc_id: [
+                        review_decision.expand_from_doc_id
+                    ]}
+                    results = scoped.retrieve(
+                        retrieval_query,
+                        user_id=user_id,
+                        top_k=cfg.retrieval.top_k_final,
+                        intent_hint=intent,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Phase 8 expand_doc: re-retrieval failed")
+
+            elif review_decision.action == "redescend" and review_decision.redirect_taxonomy_node_id:
+                target_retriever = self._pick_retriever_for_intent(intent)
+                tx_inner = target_retriever
+                for _ in range(4):
+                    if getattr(tx_inner, "name", "") == "taxonomy":
+                        break
+                    tx_inner = (
+                        getattr(tx_inner, "wrapped", None)
+                        or getattr(tx_inner, "inner", None)
+                    )
+                    if tx_inner is None:
+                        break
+                if tx_inner is not None and hasattr(tx_inner, "retrieve_from_node"):
+                    try:
+                        results = tx_inner.retrieve_from_node(
+                            retrieval_query,
+                            node_id=review_decision.redirect_taxonomy_node_id,
+                            user_id=user_id,
+                            top_k=cfg.retrieval.top_k_final,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Phase 8 redescend failed")
+                else:
+                    _emit("review_warning", {
+                        "reason": "redescend_unsupported",
+                        "retriever": getattr(target_retriever, "name", "?"),
+                    })
+
+            # Optional episodic toggle (orthogonal to the action choice).
+            if review_decision.include_episodic and plan.scope == "full":
+                try:
+                    active_retriever = self._pick_retriever_for_intent(intent)
+                    extra = active_retriever.retrieve(
+                        retrieval_query,
+                        user_id=user_id,
+                        top_k=cfg.retrieval.top_k_vector,
+                        source_types=["episodic"],
+                        intent_hint=intent,
+                    )
+                except Exception:  # noqa: BLE001
+                    extra = []
+                merged = list(results) + list(extra)
+                seen: set[str] = set()
+                dedup: list[RetrievalResult] = []
+                for r in merged:
+                    cid = r.chunk.chunk_id
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    dedup.append(r)
+                results = dedup
+
         # 3e. Post-retrieval re-route: a FACTUAL query that produced no
         # meaningfully-relevant results gets rewritten to GENERAL — the LLM
         # will then answer from world knowledge with a brief caveat instead
         # of forcing a thin RAFT answer about unrelated chunks.
-        if intent == Intent.FACTUAL:
+        # Phase 8: only fire when the user did NOT explicitly choose a
+        # different action above. ``continue`` covers both the no-pause case
+        # (the default) and the explicit accept-defaults case.
+        if review_decision.action == "continue" and intent == Intent.FACTUAL:
             floor = float(cfg.intent.corpus_relevance_floor)
             top_score = max((r.score for r in results), default=0.0)
             if not results or (floor > 0.0 and top_score < floor):
@@ -996,16 +1322,70 @@ class Orchestrator:
                 detail_hint=_detail_hint(question),
             )
         elif intent == Intent.PERSONAL:
-            retrieved_passages = (
-                _format_passages(results) if results else "(none on file)"
+            # Phase 8.2: dispatch to a sibling "empty" template when we
+            # genuinely have nothing on file — no memories AND no profile.
+            # The main personal template no longer carries the literal
+            # fallback string as an example, because small Gemma-family
+            # models were copy-pasting it verbatim on every PERSONAL turn.
+            has_profile = bool(user_profile) and user_profile != "(no profile yet)"
+            has_memory_context = bool(results) or has_profile
+
+            # Phase 8.3 — friendly memory-led dispatch. When we have at
+            # least one episodic memory AND no document chunk earned a
+            # meaningfully-positive rerank score, the bot leads with the
+            # memory, admits the limit, and offers to dig further. This
+            # is the "I want a friend and assistant" path.
+            has_episodic = any(
+                getattr(r.chunk, "source_type", "") == "episodic"
+                for r in results
             )
-            prompt = self.prompts.render(
-                Intent.PERSONAL,
-                user_profile=user_profile,
-                conversation_history=conversation_history,
-                retrieved_passages=retrieved_passages,
-                question=question,
+            has_strong_doc = any(
+                getattr(r.chunk, "source_type", "") != "episodic"
+                and (r.rerank_score is not None and r.rerank_score > 0.0)
+                for r in results
             )
+            if has_episodic and not has_strong_doc:
+                episodic_results = [
+                    r for r in results
+                    if getattr(r.chunk, "source_type", "") == "episodic"
+                ]
+                memories_block = _format_passages(episodic_results)
+                doc_results = [
+                    r for r in results
+                    if getattr(r.chunk, "source_type", "") != "episodic"
+                ]
+                if not doc_results:
+                    docs_summary = "(no relevant documents found)"
+                else:
+                    titles = ", ".join(
+                        f'"{(r.chunk.title or "untitled")[:60]}"'
+                        for r in doc_results[:3]
+                    )
+                    docs_summary = (
+                        "I looked but nothing matched well: " + titles
+                    )
+                prompt = self.prompts.render_personal_known(
+                    retrieved_memories=memories_block,
+                    retrieved_docs_summary=docs_summary,
+                    conversation_history=conversation_history,
+                    question=question,
+                )
+            elif has_memory_context:
+                retrieved_passages = (
+                    _format_passages(results) if results else "(none on file)"
+                )
+                prompt = self.prompts.render(
+                    Intent.PERSONAL,
+                    user_profile=user_profile,
+                    conversation_history=conversation_history,
+                    retrieved_passages=retrieved_passages,
+                    question=question,
+                )
+            else:
+                prompt = self.prompts.render_personal_empty(
+                    conversation_history=conversation_history,
+                    question=question,
+                )
         elif intent == Intent.GREETING:
             prompt = self.prompts.render(
                 Intent.GREETING,
@@ -1104,8 +1484,88 @@ class Orchestrator:
                     + formulas_text.strip()
                 )
 
+        # 9d. Phase 8 — follow-up chip generation.
+        # One extra LLM call producing up to 3 short follow-up questions.
+        # Gated by both ``interaction.review_enabled`` and
+        # ``interaction.followups_enabled``; default-off.
+        if (
+            cfg.interaction.review_enabled
+            and cfg.interaction.followups_enabled
+            and answer
+        ):
+            try:
+                fu_template = (
+                    Path(__file__).parent / "prompts" / "followups.md"
+                ).read_text(encoding="utf-8")
+                fu_prompt = fu_template.format(
+                    question=question,
+                    answer=answer[:1500],
+                )
+                raw_fu = self.llm.complete(
+                    fu_prompt, temperature=0.5, max_tokens=120
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Phase 8 followups: LLM call failed")
+                raw_fu = ""
+            followups: list[str] = []
+            for line in (raw_fu or "").splitlines():
+                cleaned = _strip_bullet(line)
+                if cleaned:
+                    followups.append(cleaned)
+                if len(followups) >= 3:
+                    break
+            if followups:
+                _emit("followups", {"chips": followups})
+
+        # 9c. Phase 8.3 — update the per-session "last intent + memory
+        # entities" tracker. The intent classifier reads these on the NEXT
+        # turn so a follow-up about a person the user already mentioned
+        # ("what does Mahmoud do?") short-circuits to PERSONAL without
+        # paying for an LLM call. Bounded at ``self._entity_cap`` per
+        # session, evicting oldest entries first.
+        self._session_last_intent[session_id] = intent
+        if intent == Intent.PERSONAL and results:
+            from hrag.intent import extract_entities  # noqa: PLC0415
+
+            harvested: set[str] = set()
+            for r in results:
+                if getattr(r.chunk, "source_type", "") != "episodic":
+                    continue
+                harvested |= extract_entities(getattr(r.chunk, "text", "") or "")
+                title = getattr(r.chunk, "title", "") or ""
+                if title:
+                    harvested |= extract_entities(title)
+            if harvested:
+                bucket = self._session_memory_entities.setdefault(session_id, [])
+                seen = set(bucket)
+                for ent in harvested:
+                    if ent in seen:
+                        continue
+                    bucket.append(ent)
+                    seen.add(ent)
+                # Cap eviction: drop oldest entries until <= cap.
+                if len(bucket) > self._entity_cap:
+                    drop = len(bucket) - self._entity_cap
+                    del bucket[:drop]
+
         # 10. Persist the assistant message.
-        self._save_message(session_id, user_id, "assistant", answer)
+        # Phase 8: when a real review pause happened AND persistence is on,
+        # write the decision payload to ``messages.metadata``. The column
+        # stays NULL on the no-pause / no-persistence happy path so existing
+        # downstream readers see no change.
+        assistant_metadata: Optional[str] = None
+        if (
+            cfg.interaction.persistence_enabled
+            and review_persistence is not None
+        ):
+            try:
+                assistant_metadata = json.dumps(review_persistence)
+            except Exception:  # noqa: BLE001
+                assistant_metadata = None
+        self._save_message(
+            session_id, user_id, "assistant", answer,
+            metadata=assistant_metadata,
+        )
         self.db.commit()
 
         _emit("done", {"total_s": time.time() - t_start})
@@ -1118,7 +1578,13 @@ class Orchestrator:
         )
 
     def close(self) -> None:
-        """Release database resources."""
+        """Release database resources and stop background threads."""
+        # Phase 8 — shut down the interaction-store reaper. Safe to call
+        # multiple times; subsequent calls are no-ops.
+        try:
+            self.interaction_store.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
         self.db.close()
 
     # ------------------------------------------------------------------
@@ -1133,15 +1599,22 @@ class Orchestrator:
             )
 
     def _save_message(
-        self, session_id: str, user_id: str, role: str, content: str
+        self,
+        session_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        metadata: Optional[str] = None,
     ) -> None:
+        """Insert a message row. ``metadata`` is an optional JSON string
+        persisted to the Phase-8 ``messages.metadata`` column (nullable)."""
         with self.db.conn:
             self.db.execute(
                 """
-                INSERT INTO messages (session_id, user_id, role, content)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO messages (session_id, user_id, role, content, metadata)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (session_id, user_id, role, content),
+                (session_id, user_id, role, content, metadata),
             )
 
     def _load_history(
@@ -1236,6 +1709,18 @@ def _detail_hint(question: str) -> str:
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
+
+_RE_LEADING_BULLET = re.compile(r"^[\s\-*•]*\d*[.)]?\s*")
+
+
+def _strip_bullet(line: str) -> str:
+    """Strip a leading bullet / numbering from a follow-up line.
+
+    Used by the Phase 8 follow-up chip generator to clean up bullet lists
+    the LLM occasionally returns despite the prompt asking for plain lines.
+    """
+    return _RE_LEADING_BULLET.sub("", line).strip()
 
 
 def _format_passages(results: list[RetrievalResult]) -> str:

@@ -336,7 +336,7 @@ def q4_greeting_skips_retrieval(tmp_dir: Path) -> tuple[bool | str, str]:
     orch.retriever = spy  # type: ignore[assignment]
 
     class _GreetClassifier:
-        def classify(self, text):
+        def classify(self, text, **kwargs):
             return IntentVerdict(
                 intent=Intent.GREETING,
                 confidence=1.0,
@@ -435,7 +435,7 @@ def q5_episodic_bias(tmp_dir: Path) -> tuple[bool | str, str]:
     orch.retriever = spy  # type: ignore[assignment]
 
     class _PersonalClassifier:
-        def classify(self, text):
+        def classify(self, text, **kwargs):
             return IntentVerdict(
                 intent=Intent.PERSONAL,
                 confidence=1.0,

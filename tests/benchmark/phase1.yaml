@@ -1,0 +1,86 @@
+benchmark_version: 1
+description: Phase 1 walking-skeleton verification on 3-paper corpus (HippoRAG, HippoRAG 2, RAGate).
+
+questions:
+  - id: q1
+    category: factual_single_source
+    question: "What three components of human long-term memory does HippoRAG model its architecture on?"
+    expected_substrings:
+      - "neocortex"
+      - "hippocampus"
+      - "parahippocampal"
+    expected_source_doc: "HIPPORAG"
+    notes: >
+      Pages 2-3 of HIPPORAG.pdf describe the hippocampal memory indexing theory:
+      neocortex processes stimuli, parahippocampal regions route them, and the hippocampus
+      indexes them. These three proper nouns are verbatim in the paper and unlikely to appear
+      by coincidence. Tests basic single-source factual retrieval.
+
+  - id: q2
+    category: factual_single_source
+    question: "What dataset does RAGate use for training and evaluation, and how many dialogues does it contain?"
+    expected_substrings:
+      - "KETOD"
+      - "5,324"
+    expected_source_doc: "2025.findings-naacl.30"
+    notes: >
+      Pages 4-5 of 2025.findings-naacl.30.pdf: 'we use the KETOD dataset (Chen et al., 2022),
+      which has fully annotated 5,324 dialogues'. KETOD is a distinctive dataset name and 5,324
+      is a specific number — both are robust identifiers that won't appear in the other two papers.
+
+  - id: q3
+    category: multi_hop
+    question: "In HippoRAG, what algorithm is used during online retrieval, and what two hyperparameters were tuned using MuSiQue training data?"
+    expected_substrings:
+      - "Personalized PageRank"
+      - "synonymy threshold"
+      - "damping factor"
+    expected_source_doc: "HIPPORAG"
+    notes: >
+      Requires combining two chunks from HIPPORAG.pdf: the overview (pages 3-4) names
+      Personalized PageRank as the retrieval algorithm, while the implementation details
+      (page 6, section 3.4) states the two hyperparameters tuned are the synonymy threshold
+      (0.8) and the PPR damping factor (0.5). Neither chunk alone answers the full question.
+
+  - id: q4
+    category: cross_document
+    question: "Both HippoRAG and RAGate address a limitation of standard RAG. What limitation does HippoRAG address, and what limitation does RAGate address?"
+    expected_substrings:
+      - "knowledge integration"
+      - "every turn"
+    expected_source_doc: null
+    notes: >
+      Requires synthesizing from two papers: HIPPORAG.pdf (pages 1-2) states HippoRAG
+      addresses the inability of standard RAG to efficiently integrate new experiences
+      (knowledge integration / multi-hop). 2025.findings-naacl.30.pdf (pages 1-2) states
+      RAGate addresses the unnecessary cost of augmenting every turn of the conversation.
+      'knowledge integration' is HippoRAG's key phrase; 'every turn' is RAGate's key phrase.
+      Both must appear for a correct cross-document answer.
+
+  - id: q5
+    category: conversational_followup
+    turns:
+      - "What is RAGate and what problem does it solve?"
+      - "What are the three variants it uses to implement the gating function?"
+    expected_substrings_per_turn:
+      - ["RAGate", "gating", "external knowledge"]
+      - ["RAGate-Prompt", "RAGate-PEFT", "RAGate-MHA"]
+    expected_source_doc: "2025.findings-naacl.30"
+    notes: >
+      Turn 1 is a factual question about RAGate from pages 1-2 of 2025.findings-naacl.30.pdf.
+      Turn 2 uses 'it' and 'the three variants' without restating 'RAGate' — the heuristic
+      query rewriter must expand it to 'What are the three variants RAGate uses to implement
+      the gating function?' Pages 3-4 name RAGate-Prompt, RAGate-PEFT, and RAGate-MHA.
+      These three hyphenated names are unique and specific; none appear in the HippoRAG papers.
+
+  - id: q6
+    category: out_of_corpus
+    question: "What is the GPU memory footprint in gigabytes of HippoRAG when running on a 7B Llama model?"
+    expected_substrings:
+      - "couldn't find"
+    expected_source_doc: null
+    notes: >
+      None of the three papers (HIPPORAG.pdf, 2502.14802v2.pdf, 2025.findings-naacl.30.pdf)
+      report GPU memory footprint figures for HippoRAG. The question is plausible-sounding
+      but the answer is genuinely absent from the corpus. Tests that the system falls back
+      to the 'I couldn't find that in your documents' path rather than hallucinating a number.

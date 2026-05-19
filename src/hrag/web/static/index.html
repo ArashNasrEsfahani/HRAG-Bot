@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>HRAG</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link id="hljs-style" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/styles/github-dark.min.css" />
+</head>
+<body>
+  <div id="app" class="app collapsed-mobile">
+    <!-- ===== Sidebar ===== -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <button class="brand" title="HRAG">
+          <span class="brand-mark">◆</span>
+          <span class="brand-text">HRAG</span>
+        </button>
+        <button class="icon-btn" id="toggle-sidebar" title="Collapse sidebar" aria-label="Collapse sidebar">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+      </div>
+
+      <button class="new-chat" id="new-chat">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+        <span>New chat</span>
+        <span class="kbd">Ctrl K</span>
+      </button>
+
+      <div class="sidebar-nav">
+        <button class="nav-btn" id="open-memories">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5a2 2 0 0 1 2-2h11a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2zM4 19a2 2 0 0 1 2-2h12"/></svg>
+          <span>Memories</span>
+          <span class="nav-count" id="mem-count">—</span>
+        </button>
+        <button class="nav-btn" id="open-feedback">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+          <span>Feedback</span>
+          <span class="nav-count" id="fb-count">—</span>
+        </button>
+        <button class="nav-btn" id="open-docs">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          <span>Documents</span>
+          <span class="nav-count" id="doc-count">—</span>
+        </button>
+        <button class="nav-btn" id="open-taxonomy" title="Taxonomy editor">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="4" r="2"/>
+            <circle cx="5"  cy="14" r="2"/>
+            <circle cx="12" cy="14" r="2"/>
+            <circle cx="19" cy="14" r="2"/>
+            <circle cx="5"  cy="20" r="1.4"/>
+            <circle cx="19" cy="20" r="1.4"/>
+            <path d="M12 6v6M12 12L5 12.2M12 12l7 0.2M5 14v4M19 14v4"/>
+          </svg>
+          <span>Taxonomy</span>
+          <span class="nav-count" id="tax-count">—</span>
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Recent</div>
+        <div class="session-list" id="session-list">
+          <div class="loading-row"><span class="shimmer"></span></div>
+          <div class="loading-row"><span class="shimmer"></span></div>
+          <div class="loading-row"><span class="shimmer"></span></div>
+        </div>
+      </div>
+
+      <div class="sidebar-foot">
+        <button class="user-pill" id="user-pill" title="Switch user">
+          <span class="avatar" id="avatar">?</span>
+          <span class="user-meta">
+            <span class="user-name" id="user-name">default</span>
+            <span class="user-sub" id="user-sub">active user</span>
+          </span>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 9l4-4 4 4M8 15l4 4 4-4"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ===== Main column ===== -->
+    <main class="main">
+      <!-- Top bar -->
+      <header class="topbar">
+        <button class="icon-btn show-on-collapsed" id="open-sidebar" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <div class="topbar-title">
+          <span id="topbar-model">—</span>
+          <span class="dot">·</span>
+          <span id="topbar-retriever">—</span>
+        </div>
+        <div class="topbar-spacer"></div>
+        <button class="icon-btn" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark">
+          <svg id="theme-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="open-settings" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.8.3l-.1.1A2 2 0 1 1 4.3 17l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>
+          </svg>
+        </button>
+      </header>
+
+      <!-- Message scroll area -->
+      <div class="scroll" id="scroll">
+        <div class="messages" id="messages">
+          <!-- Empty state -->
+          <div class="empty-state" id="empty-state">
+            <div class="hero-mark">◆</div>
+            <h1>How can I help today?</h1>
+            <p class="hero-sub">Ask anything across your documents and memories.</p>
+            <div class="suggestions" id="suggestions">
+              <button class="suggestion">Summarise the key ideas from my last paper.</button>
+              <button class="suggestion">/remember Today I learned about RAGate.</button>
+              <button class="suggestion">/recall what did I save about taxonomy?</button>
+              <button class="suggestion">Compare HippoRAG and GraphRAG approaches.</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="scroll-anchor" id="anchor"></div>
+      </div>
+
+      <!-- Input -->
+      <div class="composer-wrap">
+        <form class="composer" id="composer" autocomplete="off">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="Message HRAG…"
+            spellcheck="false"
+          ></textarea>
+          <div class="composer-actions">
+            <div class="composer-hint" id="composer-hint">Enter to send · Shift+Enter for newline</div>
+            <div class="remember-group">
+              <button type="button" class="remember" id="remember-btn" title="Save current text as a memory · empty input opens Smart Remember (Alt+R)" aria-label="Remember this">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+                </svg>
+                <span>Remember</span>
+              </button>
+              <button type="button" class="remember-caret" id="remember-caret-btn" title="Smart Remember — extract from chat (Alt+Shift+R)" aria-label="Smart Remember">
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4">
+                  <path d="M6 9l6 6 6-6"/>
+                </svg>
+              </button>
+            </div>
+            <button type="submit" class="send" id="send" disabled aria-label="Send">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="M5 12l14-7-4 14-3-5-7-2z"/>
+              </svg>
+            </button>
+          </div>
+        </form>
+        <div class="composer-foot">HRAG can make mistakes. Verify important info.</div>
+      </div>
+
+      <!-- ===== Smart Remember modal ===== -->
+      <div class="rem-modal-scrim" id="rem-modal-scrim" hidden></div>
+      <div class="rem-modal" id="rem-modal" hidden role="dialog" aria-modal="true" aria-labelledby="rem-modal-title">
+        <div class="rem-modal-head">
+          <div class="rem-modal-title" id="rem-modal-title">What should I remember?</div>
+          <button class="icon-btn" id="rem-modal-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <div class="rem-modal-sub" id="rem-modal-sub">Analyzing conversation…</div>
+        <div class="rem-modal-body" id="rem-modal-body">
+          <!-- populated dynamically -->
+        </div>
+        <div class="rem-modal-foot">
+          <button class="ghost" id="rem-modal-cancel" type="button">Cancel</button>
+          <button class="primary" id="rem-modal-save" type="button">Save selected</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- ===== Settings drawer ===== -->
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <h2>Settings</h2>
+        <button class="icon-btn" id="close-drawer" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body">
+        <section class="drawer-section">
+          <h3>Model</h3>
+          <div class="kv"><span>Provider</span><span id="cfg-provider">—</span></div>
+          <label class="field">
+            <span>Model</span>
+            <select id="cfg-model"><option>—</option></select>
+          </label>
+          <label class="toggle">
+            <span>Think mode</span>
+            <input type="checkbox" id="cfg-think" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <div class="hint">When on, the LLM emits internal reasoning. Off is much faster on short prompts.</div>
+          <label class="field">
+            <span>Context window</span>
+            <select id="cfg-num-ctx">
+              <option value="2048">2048</option>
+              <option value="4096">4096</option>
+              <option value="8192">8192</option>
+              <option value="16384">16384</option>
+              <option value="32768">32768</option>
+              <option value="65536">65536</option>
+              <option value="131072">131072</option>
+            </select>
+          </label>
+          <div class="hint">Smaller = smaller KV cache, more headroom on GPU. 8192 covers most prompts.</div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Retrieval</h3>
+          <label class="field">
+            <span>Retriever</span>
+            <select id="cfg-retriever">
+              <option value="taxonomy">taxonomy</option>
+              <option value="vector">vector</option>
+              <option value="bm25">bm25</option>
+              <option value="hybrid">hybrid</option>
+              <option value="kg_ppr">kg_ppr</option>
+              <option value="community">community</option>
+              <option value="router">router</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Reranker</span>
+            <select id="cfg-reranker">
+              <option value="cross_encoder">cross_encoder</option>
+              <option value="llm">llm</option>
+              <option value="batched_llm">batched_llm</option>
+            </select>
+          </label>
+          <label class="toggle">
+            <span>Rerank enabled</span>
+            <input type="checkbox" id="cfg-rerank-enabled" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Compaction</h3>
+          <label class="toggle">
+            <span>Gate (skip retrieval on small-talk)</span>
+            <input type="checkbox" id="cfg-gate" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <label class="toggle">
+            <span>Clue (rewrite vague queries)</span>
+            <input type="checkbox" id="cfg-clue" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <label class="toggle">
+            <span>Dialog MST (summarise long history)</span>
+            <input type="checkbox" id="cfg-mst" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <label class="toggle">
+            <span>Show [UNCERTAIN] markers</span>
+            <input type="checkbox" id="cfg-mask" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Phase 6 · Adaptive retrieval &amp; LLM warmth</h3>
+          <label class="toggle">
+            <span>Adaptive retrieval</span>
+            <input type="checkbox" id="cfg-adaptive" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <div class="hint">Skip retrieval on greetings; per-intent top_k.</div>
+          <label class="toggle" id="cfg-bias-row">
+            <span>Personal episodic bias</span>
+            <input type="checkbox" id="cfg-bias" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <div class="hint">Float saved memories to the top of personal queries.</div>
+
+          <div class="topk-grid-label">Per-intent top_k <span class="hint-inline">(0 = skip)</span></div>
+          <div class="topk-grid" id="cfg-topk-grid">
+            <label class="topk-row"><span>greeting</span><input type="number" min="0" max="50" id="topk-greeting" /></label>
+            <label class="topk-row"><span>personal</span><input type="number" min="0" max="50" id="topk-personal" /></label>
+            <label class="topk-row"><span>factual</span><input type="number" min="0" max="50" id="topk-factual" /></label>
+            <label class="topk-row"><span>general</span><input type="number" min="0" max="50" id="topk-general" /></label>
+            <label class="topk-row"><span>unclear</span><input type="number" min="0" max="50" id="topk-unclear" /></label>
+          </div>
+
+          <label class="field">
+            <span>LLM keep-alive</span>
+            <input type="text" id="cfg-keep-alive" class="field-input" placeholder="30m" />
+          </label>
+          <div class="hint">Examples: <code>30m</code>, <code>1h</code>, <code>-1s</code> (never unload).</div>
+
+          <label class="field">
+            <span>KV-cache num_keep tokens</span>
+            <input type="number" min="0" step="1" id="cfg-num-keep" class="field-input" placeholder="(auto)" />
+          </label>
+          <div class="hint">Best-effort cross-turn cache priming for Ollama. Leave blank to let Ollama decide. Try ~system-prompt-token-count for cache reuse.</div>
+
+          <div class="backend-badges">
+            <div class="be-badge" id="be-vector" title="Restart to change. Set retrieval.vector_backend in config.yaml.">
+              <span class="be-label">vector</span>
+              <span class="be-value" id="be-vector-val">—</span>
+            </div>
+            <div class="be-badge" id="be-kg" title="Restart to change. Set kg.backend in config.yaml.">
+              <span class="be-label">kg</span>
+              <span class="be-value" id="be-kg-val">—</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Phase 7-A · Math handling</h3>
+          <label class="toggle">
+            <span>Math-meta filter</span>
+            <input type="checkbox" id="cfg-math-meta" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <div class="hint">When the query asks for "formulas / equations / math", filter retrieval to chunks tagged <code>has_math=True</code>. Run <code>python scripts/backfill_has_math.py</code> first.</div>
+
+          <label class="toggle" id="cfg-formula-row">
+            <span>Formula extraction</span>
+            <input type="checkbox" id="cfg-formula" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <div class="hint">After answering, run a second LLM pass that extracts every formula verbatim. Adds one extra call per math-meta turn.</div>
+
+          <label class="field">
+            <span>Rerank threshold (math-meta queries)</span>
+            <input type="number" step="0.1" id="cfg-math-rerank" class="field-input" />
+          </label>
+          <div class="hint">Lower = more permissive. The default <code>−5</code> for non-math queries stays the same.</div>
+
+          <label class="field">
+            <span>Extraction max tokens</span>
+            <input type="number" min="1" max="8192" step="1" id="cfg-formula-tokens" class="field-input" />
+          </label>
+          <div class="hint">Cap on the formula-extraction LLM call. Default 400.</div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Phase 6-B · Per-intent retrieval</h3>
+          <div class="topk-grid-label">Override the global retriever per intent</div>
+          <div class="topk-grid" id="cfg-adaptive-retr-grid">
+            <label class="topk-row"><span>greeting</span>
+              <select id="adr-greeting" class="adr-select">
+                <option value="default">default</option><option value="vector">vector</option><option value="bm25">bm25</option><option value="hybrid">hybrid</option><option value="kg_ppr">kg_ppr</option><option value="community">community</option><option value="router">router</option><option value="taxonomy">taxonomy</option>
+              </select>
+            </label>
+            <label class="topk-row"><span>personal</span>
+              <select id="adr-personal" class="adr-select">
+                <option value="default">default</option><option value="vector">vector</option><option value="bm25">bm25</option><option value="hybrid">hybrid</option><option value="kg_ppr">kg_ppr</option><option value="community">community</option><option value="router">router</option><option value="taxonomy">taxonomy</option>
+              </select>
+            </label>
+            <label class="topk-row"><span>factual</span>
+              <select id="adr-factual" class="adr-select">
+                <option value="default">default</option><option value="vector">vector</option><option value="bm25">bm25</option><option value="hybrid">hybrid</option><option value="kg_ppr">kg_ppr</option><option value="community">community</option><option value="router">router</option><option value="taxonomy">taxonomy</option>
+              </select>
+            </label>
+            <label class="topk-row"><span>general</span>
+              <select id="adr-general" class="adr-select">
+                <option value="default">default</option><option value="vector">vector</option><option value="bm25">bm25</option><option value="hybrid">hybrid</option><option value="kg_ppr">kg_ppr</option><option value="community">community</option><option value="router">router</option><option value="taxonomy">taxonomy</option>
+              </select>
+            </label>
+            <label class="topk-row"><span>unclear</span>
+              <select id="adr-unclear" class="adr-select">
+                <option value="default">default</option><option value="vector">vector</option><option value="bm25">bm25</option><option value="hybrid">hybrid</option><option value="kg_ppr">kg_ppr</option><option value="community">community</option><option value="router">router</option><option value="taxonomy">taxonomy</option>
+              </select>
+            </label>
+          </div>
+          <div class="hint"><code>default</code> means use the global retriever. Requires <b>Adaptive retrieval</b> (Phase 6) to be on for these overrides to take effect.</div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Phase 7-B · Embedding model</h3>
+          <label class="field">
+            <span>Model</span>
+            <select id="cfg-embeddings-model"><option>—</option></select>
+          </label>
+          <div class="be-badge" id="emb-current-badge" style="margin-top:8px">
+            <span class="be-label">current</span>
+            <span class="be-value" id="emb-current-val">—</span>
+          </div>
+          <div class="warn-banner" id="emb-warn">
+            ⚠ Changing the embedding model requires re-ingesting your corpus (<code>hrag init &amp;&amp; hrag ingest &lt;path&gt;</code>). Existing embeddings under the old model will be discarded.
+          </div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>Phase 7-C · PDF loader (Nougat)</h3>
+          <label class="toggle">
+            <span>Use Nougat for PDF ingest</span>
+            <input type="checkbox" id="cfg-use-nougat" />
+            <span class="track"><span class="thumb"></span></span>
+          </label>
+          <div class="be-badge" id="nougat-status-badge" style="margin-top:8px">
+            <span class="be-label">status</span>
+            <span class="be-value" id="nougat-status-val">—</span>
+          </div>
+          <label class="field" style="margin-top:8px">
+            <span>Nougat model</span>
+            <input type="text" id="cfg-nougat-model" class="field-input" placeholder="facebook/nougat-base" />
+          </label>
+          <div class="hint">When enabled and Nougat is installed, academic-PDF ingest uses Nougat OCR for LaTeX-aware extraction. Silent fallback to PyMuPDF otherwise.</div>
+        </section>
+      </div>
+    </aside>
+
+    <!-- ===== Memories drawer ===== -->
+    <aside class="drawer drawer-wide" id="memories-drawer">
+      <div class="drawer-head">
+        <h2>Memories</h2>
+        <button class="icon-btn" id="close-memories" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body">
+        <div class="drawer-toolbar">
+          <input type="text" id="mem-search" placeholder="Filter memories…" />
+          <button class="ghost-btn" id="mem-add" title="Add memory">+</button>
+          <button class="ghost-btn" id="mem-refresh" title="Refresh">↻</button>
+        </div>
+        <div id="mem-list"></div>
+      </div>
+    </aside>
+
+    <!-- ===== Documents drawer ===== -->
+    <aside class="drawer drawer-wide" id="docs-drawer">
+      <div class="drawer-head">
+        <h2>Documents</h2>
+        <button class="icon-btn" id="close-docs" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body">
+        <div class="upload-zone" id="upload-zone">
+          <input type="file" id="upload-input" accept=".pdf,.docx,.md,.markdown,.txt" multiple hidden />
+          <div class="upload-zone-inner">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v14M5 10l7-7 7 7M5 21h14"/></svg>
+            <div class="upload-text">
+              <b>Drop files</b> here, or <button type="button" class="link-btn" id="upload-browse">browse</button>
+              <div class="upload-hint">PDF, DOCX, MD, TXT</div>
+            </div>
+          </div>
+          <div id="upload-progress" class="upload-progress"></div>
+        </div>
+        <div id="docs-list"></div>
+      </div>
+    </aside>
+
+    <!-- ===== Feedback drawer ===== -->
+    <aside class="drawer drawer-wide" id="feedback-drawer">
+      <div class="drawer-head">
+        <h2>Feedback</h2>
+        <div style="display:inline-flex; gap:6px; align-items:center">
+          <button class="icon-btn" id="refresh-feedback" title="Refresh" aria-label="Refresh">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3.36-7"/><path d="M21 4v6h-6"/></svg>
+          </button>
+          <button class="icon-btn" id="close-feedback" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="drawer-body">
+        <div class="fb-summary-card" id="fb-summary-card">
+          <div class="fb-counts">
+            <div class="fb-count fb-count-up">
+              <div class="fb-count-icon">👍</div>
+              <div class="fb-count-num" id="fb-up-num">—</div>
+            </div>
+            <div class="fb-count fb-count-down">
+              <div class="fb-count-icon">👎</div>
+              <div class="fb-count-num" id="fb-down-num">—</div>
+            </div>
+            <div class="fb-count fb-count-total">
+              <div class="fb-count-label">total</div>
+              <div class="fb-count-num" id="fb-total-num">—</div>
+            </div>
+          </div>
+          <div class="fb-ratio-bar" title="Helpful vs unhelpful ratio">
+            <span class="fb-ratio-fill fb-ratio-up" id="fb-ratio-up" style="width:0%"></span>
+            <span class="fb-ratio-fill fb-ratio-down" id="fb-ratio-down" style="width:0%"></span>
+          </div>
+        </div>
+
+        <div class="fb-sessions-card">
+          Across <b id="fb-sessions-num">0</b> sessions.
+        </div>
+
+        <div class="fb-section-label">Top 👎 messages</div>
+        <div id="fb-negatives"></div>
+      </div>
+    </aside>
+
+    <div class="drawer-scrim" id="drawer-scrim"></div>
+
+    <!-- ===== Taxonomy editor (full-screen) ===== -->
+    <main class="taxonomy-page" id="taxonomy-page" aria-hidden="true">
+      <header class="tax-toolbar">
+        <button class="tax-back" id="tax-back" title="Back to chat" aria-label="Back to chat">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          <span>Chat</span>
+        </button>
+        <div class="tax-brand">
+          <span class="tax-mark">🌳</span>
+          <span class="tax-title">Taxonomy</span>
+        </div>
+        <div class="tax-counts" id="tax-counts">
+          <span class="tax-count-pill"><b id="tax-nodes-n">—</b><span>nodes</span></span>
+          <span class="tax-count-pill"><b id="tax-docs-n">—</b><span>docs</span></span>
+          <span class="tax-count-pill" id="tax-unfiled-pill"><b id="tax-unfiled-n">—</b><span>unfiled</span></span>
+        </div>
+        <div class="tax-toolbar-spacer"></div>
+        <button class="tax-btn" id="tax-options-btn" title="Options">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.8.3l-.1.1A2 2 0 1 1 4.3 17l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          <span>Options</span>
+        </button>
+        <button class="tax-btn" id="tax-assign-btn" title="Assign unfiled docs" disabled>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12l4 4L19 6"/></svg>
+          <span>Assign unfiled</span>
+        </button>
+        <button class="tax-btn tax-btn-primary" id="tax-recompute-btn" title="Recompute taxonomy">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3.36-7"/><path d="M21 4v6h-6"/></svg>
+          <span>Recompute</span>
+        </button>
+      </header>
+
+      <section class="tax-canvas" id="tax-canvas">
+        <div class="tax-empty" id="tax-empty" hidden>
+          <div class="tax-empty-icon">🌱</div>
+          <h2>No taxonomy yet</h2>
+          <p>Recompute to grow a category tree from your documents.</p>
+          <button class="tax-btn tax-btn-primary tax-btn-large" id="tax-empty-cta">
+            <span>Recompute</span>
+          </button>
+        </div>
+        <div class="tax-loading" id="tax-loading" hidden>
+          <div class="tax-spinner"></div>
+          <div>Loading taxonomy…</div>
+        </div>
+        <svg id="tax-svg" class="tax-svg" hidden>
+          <g id="tax-zoom-layer">
+            <g id="tax-links-layer"></g>
+            <g id="tax-nodes-layer"></g>
+          </g>
+        </svg>
+        <div class="tax-minimap" aria-hidden="true">
+          <div class="tax-mini-label">drag · scroll to zoom · click to edit</div>
+        </div>
+      </section>
+
+      <!-- Options sidebar drawer -->
+      <aside class="tax-options" id="tax-options" aria-hidden="true">
+        <div class="tax-options-head">
+          <h3>Recompute options</h3>
+          <button class="icon-btn" id="tax-options-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <div class="tax-options-body">
+          <label class="tax-field">
+            <span>Beam width</span>
+            <input type="number" id="tax-opt-beam" min="1" max="20" step="1" />
+            <small>nodes kept per level during descent</small>
+          </label>
+          <label class="tax-field">
+            <span>Max depth</span>
+            <input type="number" id="tax-opt-depth" min="1" max="12" step="1" />
+            <small>safety bound on tree height</small>
+          </label>
+          <label class="tax-field">
+            <span>Propose sample size</span>
+            <input type="number" id="tax-opt-sample" min="1" max="500" step="1" />
+            <small>docs sampled for the LLM proposal</small>
+          </label>
+          <label class="tax-field">
+            <span>Max children per node</span>
+            <input type="number" id="tax-opt-children" min="1" max="40" step="1" />
+            <small>cap on LLM-proposed branches</small>
+          </label>
+          <label class="tax-field">
+            <span>Min top-score floor</span>
+            <input type="number" id="tax-opt-floor" min="0" max="1" step="0.01" />
+            <small>confidence floor on the root</small>
+          </label>
+          <label class="tax-field">
+            <span>Max docs per node (%)</span>
+            <input type="number" id="tax-opt-pct" min="0" max="1" step="0.01" />
+            <small>cap on share of user's corpus a single node can hold</small>
+          </label>
+          <div class="tax-options-hint" id="tax-options-hint">Saved on blur.</div>
+        </div>
+      </aside>
+
+      <!-- Node edit popover (positioned absolutely; toggled by JS) -->
+      <div class="tax-popover" id="tax-popover" hidden>
+        <div class="tax-popover-head">
+          <input type="text" id="tax-pop-label" class="tax-pop-label" placeholder="Label" />
+          <button class="icon-btn tax-pop-close" id="tax-pop-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <textarea id="tax-pop-desc" class="tax-pop-desc" placeholder="Description (optional)"></textarea>
+        <div class="tax-pop-actions">
+          <button class="tax-mini-btn" id="tax-pop-add">＋ child</button>
+          <button class="tax-mini-btn tax-mini-btn-danger" id="tax-pop-del">Delete</button>
+        </div>
+        <div class="tax-pop-docs-label">Assigned docs <span id="tax-pop-doc-count">(0)</span></div>
+        <div class="tax-pop-docs" id="tax-pop-docs"></div>
+      </div>
+
+      <!-- Right-side doc / memory preview panel -->
+      <aside class="doc-panel" id="doc-panel" aria-hidden="true">
+        <header class="doc-panel-head">
+          <div class="doc-panel-title-wrap">
+            <div class="doc-panel-icon" id="doc-panel-icon">📄</div>
+            <div class="doc-panel-title" id="doc-panel-title">Document</div>
+          </div>
+          <button class="icon-btn" id="doc-panel-close" aria-label="Close preview" title="Close">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </header>
+        <div class="doc-panel-meta" id="doc-panel-meta"></div>
+        <div class="doc-panel-body" id="doc-panel-body">
+          <div class="doc-panel-placeholder">Click a doc chip to preview it here.</div>
+        </div>
+        <footer class="doc-panel-foot" id="doc-panel-foot" hidden>
+          <button class="ghost" id="doc-panel-delete" type="button">Delete</button>
+        </footer>
+      </aside>
+
+      <!-- Recompute progress modal -->
+      <div class="tax-modal-scrim" id="tax-modal-scrim" hidden></div>
+      <div class="tax-modal" id="tax-modal" hidden role="dialog" aria-modal="true">
+        <div class="tax-modal-head">
+          <div class="tax-modal-title-wrap">
+            <div class="tax-modal-title" id="tax-modal-title">Recomputing taxonomy…</div>
+            <div class="tax-modal-tick" id="tax-modal-tick">elapsed –</div>
+          </div>
+          <button class="icon-btn" id="tax-modal-close" aria-label="Close" hidden>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+        <ol class="tax-stages" id="tax-stages">
+          <li class="tax-stage" data-stage="doc_summary">
+            <span class="tax-stage-dot"></span>
+            <span class="tax-stage-label">Summarising documents</span>
+            <span class="tax-stage-detail" data-role="detail"></span>
+            <div class="tax-stage-bar" data-role="bar"><span></span></div>
+          </li>
+          <li class="tax-stage" data-stage="embed_centroids">
+            <span class="tax-stage-dot"></span>
+            <span class="tax-stage-label">Embedding centroids</span>
+            <span class="tax-stage-detail" data-role="detail"></span>
+          </li>
+          <li class="tax-stage" data-stage="propose_tree">
+            <span class="tax-stage-dot"></span>
+            <span class="tax-stage-label">Proposing tree (LLM)</span>
+            <span class="tax-stage-detail" data-role="detail"></span>
+          </li>
+          <li class="tax-stage" data-stage="materialize">
+            <span class="tax-stage-dot"></span>
+            <span class="tax-stage-label">Materialising nodes</span>
+            <span class="tax-stage-detail" data-role="detail"></span>
+          </li>
+          <li class="tax-stage" data-stage="assign_docs">
+            <span class="tax-stage-dot"></span>
+            <span class="tax-stage-label">Assigning documents</span>
+            <span class="tax-stage-detail" data-role="detail"></span>
+          </li>
+        </ol>
+        <div class="tax-modal-summary" id="tax-modal-summary" hidden></div>
+        <div class="tax-modal-error" id="tax-modal-error" hidden></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Markdown / sanitiser / syntax highlighting -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/highlight.min.js"></script>
+  <!-- D3 for the taxonomy editor -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,191 @@
+benchmark_version: 2
+description: >
+  Phase 2 v2 — rigid benchmark for the patched router (BM25-in-RRF, oversample=1×,
+  entity-biased classifier, router_classify diagnostic event). 9 questions across
+  3 single-source factual, 1 multi-hop, 2 cross_document, 1 followup, 1 out-of-corpus,
+  1 numeric. Each question annotates the route the router SHOULD pick under
+  `expected_route` so the runner can score routing accuracy as a separate dimension.
+
+questions:
+
+  # ── q1: factual_single_source ─ entity route ─ HIPPORAG ──────────────────────
+  - id: q1
+    category: factual_single_source
+    question: "What two multi-hop QA benchmarks does HippoRAG primarily evaluate on, and by what margin does it outperform baselines on the harder of the two?"
+    expected_substrings:
+      - "MuSiQue"
+      - "2WikiMultiHopQA"
+      - "20"
+    expected_source_doc: "HIPPORAG"
+    expected_route: "entity"
+    notes: >
+      HIPPORAG.pdf abstract (page 1) states HippoRAG is evaluated on MuSiQue and
+      2WikiMultiHopQA, achieving "strong performance improvements of around 3 and 20
+      points over current RAG methods". Both benchmark names are distinctive proper
+      nouns that appear only in HIPPORAG.pdf at this specificity level. "20" matches
+      the margin figure and is robust because the sentence pairs it with
+      2WikiMultiHopQA — the LLM must retrieve the abstract/intro chunk. Neither
+      benchmark name appears in 2025.findings-naacl.30.pdf. NEW question (not in
+      phase1 or phase2) — chosen to exercise the entity path on HIPPORAG with a
+      factual question not reused from q4.
+
+  # ── q2: factual_single_source ─ entity route ─ 2025.findings-naacl.30 ────────
+  - id: q2
+    category: factual_single_source
+    question: "What dataset does RAGate use for training and evaluation, and how many dialogues does it contain?"
+    expected_substrings:
+      - "KETOD"
+      - "5,324"
+    expected_source_doc: "2025.findings-naacl.30"
+    expected_route: "entity"
+    notes: >
+      Verbatim carry-over from phase1 q2, which PASSED. 2025.findings-naacl.30.pdf
+      pages 4-5 (Section 4 Model Training and Evaluation Setups): "we use the KETOD
+      dataset (Chen et al., 2022), which has fully annotated 5,324 dialogues and
+      52,063 turns of conversations". KETOD is a distinctive dataset name absent from
+      HIPPORAG.pdf and 2502.14802v2.pdf. "5,324" is a precise count that cannot appear
+      by coincidence. Tests that the entity path independently retrieves from the RAGate
+      paper, confirming per-paper retrievability under the patched router.
+
+  # ── q3: factual_single_source ─ entity route ─ 2502.14802v2 ─────────────────
+  - id: q3
+    category: factual_single_source
+    question: "What is the default method HippoRAG 2 uses to link queries to the knowledge graph, and which embedding model does it adopt as its primary retriever?"
+    expected_substrings:
+      - "query-to-triple"
+      - "NV-Embed-v2"
+    expected_source_doc: "2502.14802v2"
+    expected_route: "entity"
+    notes: >
+      NEW question targeting 2502.14802v2 exclusively. Section 3.3 of 2502.14802v2.pdf
+      (Deeper Contextualization) states "By default, HippoRAG 2 adopts the
+      query-to-triple approach". Section 4.1 (Baselines) and Section 4.4 (Implementation
+      Details) name "nvidia/NV-Embed-v2" as the primary retriever. Both phrases are
+      verbatim and unique to 2502.14802v2 — "query-to-triple" does not appear in
+      HIPPORAG.pdf (which uses NER-to-node) and "NV-Embed-v2" only appears as a baseline
+      name in that paper. Tests that the entity path retrieves from HippoRAG 2
+      independently, confirming all three papers are reachable under the patched router.
+
+  # ── q4: multi_hop ─ entity route ─ HIPPORAG ──────────────────────────────────
+  - id: q4
+    category: multi_hop
+    question: "In HippoRAG, what algorithm is used during online retrieval, and what two hyperparameters were tuned using MuSiQue training data?"
+    expected_substrings:
+      - "Personalized PageRank"
+      - "synonymy threshold"
+      - "damping factor"
+    expected_source_doc: "HIPPORAG"
+    expected_route: "entity"
+    notes: >
+      Verbatim carry-over from phase1 q3 and phase2 q3, both of which PASSED.
+      HIPPORAG.pdf Section 2.2 (page 3) names Personalized PageRank as the online
+      retrieval algorithm. Section 3.4 (page 6) states "the synonymy threshold τ at
+      0.8 and the PPR damping factor at 0.5" as the two hyperparameters tuned on
+      MuSiQue training data. No single chunk answers both sub-questions — the answer
+      requires combining two passages, which is exactly the multi-hop scenario
+      KG-PPR graph traversal is designed for. Re-using this question provides a clean
+      PASS-vs-PASS baseline diff between phase1, phase2, and phase2_v2.
+
+  # ── q5: cross_document ─ cross_document route ─ HIPPORAG + RAGate ────────────
+  - id: q5
+    category: cross_document
+    question: "Both HippoRAG and RAGate address a limitation of standard RAG. What limitation does HippoRAG address, and what limitation does RAGate address?"
+    expected_substrings:
+      - "knowledge integration"
+      - "every turn"
+    expected_source_doc: null
+    expected_route: "cross_document"
+    notes: >
+      Verbatim carry-over from phase1 q4 and phase2 q4 — the primary acceptance
+      criterion for Phase 2. HIPPORAG.pdf Figure 1 caption reads "Knowledge Integration
+      & RAG" and the introduction states the goal of "knowledge integration over new
+      experiences". 2025.findings-naacl.30.pdf introduction (page 2) states "the
+      necessity of augmenting every turn of the conversation with external knowledge
+      remains questionable". "knowledge integration" anchors to HippoRAG; "every turn"
+      anchors to RAGate. Both must appear in the answer, requiring the router to take
+      the cross_document path and fuse chunks from both papers via RRF. FAIL→PASS
+      here remains the primary go/no-go signal for the Phase 2 router fix.
+
+  # ── q6: cross_document ─ cross_document route ─ HIPPORAG + HippoRAG 2 ────────
+  - id: q6
+    category: cross_document
+    question: "Both HippoRAG and HippoRAG 2 use the Personalized PageRank algorithm. What does the original HippoRAG use as seed nodes for PPR, and what additional node type does HippoRAG 2 also include as seed nodes?"
+    expected_substrings:
+      - "named entities"
+      - "passage node"
+    expected_source_doc: null
+    expected_route: "cross_document"
+    notes: >
+      NEW cross-document question forcing retrieval from two closely related papers.
+      HIPPORAG.pdf Section 2.3 (page 4) states that "named entities from the query"
+      (query named entities Cq) become the seed nodes for PPR — the phrase "named
+      entities" is the key anchor. 2502.14802v2.pdf Section 3.5 (Online Retrieval)
+      states "All passage nodes are also taken as seed nodes". The two papers share
+      vocabulary (PPR, seeds) but differ on seed node types — a correct answer must
+      cite both. High lexical overlap between HIPPORAG and HippoRAG 2 means a simple
+      vector retriever easily confines results to one paper; the cross_document RRF
+      path is required to surface both. Second cross-doc case prevents a single fluky
+      router classification from masking a real failure.
+
+  # ── q7: conversational_followup ─ entity (turn 2) ─ 2025.findings-naacl.30 ───
+  - id: q7
+    category: conversational_followup
+    turns:
+      - "What is RAGate and what problem does it solve?"
+      - "What are the three variants it uses to implement the gating function?"
+    expected_substrings_per_turn:
+      - ["RAGate", "gating", "external knowledge"]
+      - ["RAGate-Prompt", "RAGate-PEFT", "RAGate-MHA"]
+    expected_source_doc: "2025.findings-naacl.30"
+    expected_route: null  # turn 1: any; turn 2: entity (rewriter expands "it" → RAGate)
+    notes: >
+      Verbatim carry-over from phase1 q5 and phase2 q5, both of which PASSED.
+      Turn 1 is self-contained: answered by 2025.findings-naacl.30.pdf pages 1-2
+      (RAGate is a gating model that adaptively determines when to augment with external
+      knowledge). Turn 2 uses "it" and "the three variants" without restating the subject,
+      requiring the heuristic query rewriter to expand to "What are the three variants
+      RAGate uses to implement the gating function?" before hitting the router.
+      2025.findings-naacl.30.pdf Section 3.2 Figure 2 caption and body name all three:
+      RAGate-Prompt (LLM prompting), RAGate-PEFT (parameter-efficient fine-tuning),
+      and RAGate-MHA (multi-head attention encoder). These three hyphenated names are
+      unique to this paper. expected_route is null because the turn-1 router path is
+      incidental; turn-2 entity routing is the exercised behaviour.
+
+  # ── q8: out_of_corpus ─ route incidental ─ none ──────────────────────────────
+  - id: q8
+    category: out_of_corpus
+    question: "What is the date of birth of Bernal Jiménez Gutiérrez, the lead author of HippoRAG?"
+    expected_substrings:
+      - "couldn't find"
+    expected_source_doc: null
+    expected_route: null
+    notes: >
+      NEW out-of-corpus question replacing phase2 q6 (BLEU/GPT-4o), which was too
+      plausible and caused hallucination because HippoRAG 2 NarrativeQA F1 passages
+      were retrieved and cited. An author's date of birth is biographical metadata
+      that no research paper contains — it is clearly out-of-domain (personal facts
+      vs. technical content) and cannot be inferred from anything in the corpus.
+      "Bernal Jiménez Gutiérrez" is the real lead author (confirmed from HIPPORAG.pdf
+      and 2502.14802v2.pdf author lists) so the name is plausible and prevents the
+      system from refusing on the name alone, but the fact itself is strictly absent.
+      Tests the "couldn't find" fallback path cleanly without citation interference.
+
+  # ── q9: numeric_fact ─ entity route ─ 2502.14802v2 ──────────────────────────
+  - id: q9
+    category: numeric_fact
+    question: "What default weight factor does HippoRAG 2 assign to passage nodes when initialising PPR reset probabilities, according to its ablation study?"
+    expected_substrings:
+      - "0.05"
+      - "passage node"
+    expected_source_doc: "2502.14802v2"
+    expected_route: "entity"
+    notes: >
+      NEW numeric question targeting 2502.14802v2 exclusively. Section 6.2 and Table 5
+      of 2502.14802v2.pdf (Controlling Reset Probabilities) state: "we set the factor
+      to be 0.05 by default" for passage node reset probabilities in PPR. "0.05" is an
+      exact floating-point string that cannot appear by coincidence and uniquely
+      identifies this specific experimental finding. "passage node" is the precise
+      technical term introduced in Section 3.2 of the same paper. The combination
+      distinguishes this chunk from any other numeric mention. Tests that the entity
+      path can retrieve a specific implementation detail from the ablation section of
+      HippoRAG 2, exercising precision retrieval beyond the abstract/intro.

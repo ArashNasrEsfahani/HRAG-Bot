@@ -1,0 +1,59 @@
+{
+  "phase": 6,
+  "passed": 8,
+  "failed": 0,
+  "skipped": 0,
+  "total": 8,
+  "accepted": true,
+  "questions": [
+    {
+      "label": "Q1 \u2014 sqlite-vec backend roundtrip",
+      "status": "PASS",
+      "message": "sqlite-vec backend: upsert+query+filter+delete OK (sqlite_vec)",
+      "duration_s": 0.191
+    },
+    {
+      "label": "Q2 \u2014 Neo4j backend wiring + actionable error",
+      "status": "PASS",
+      "message": "Neo4j backend: wiring + clear error without server (no longer a stub)",
+      "duration_s": 0.002
+    },
+    {
+      "label": "Q3 \u2014 Adaptive top_k resolver per intent",
+      "status": "PASS",
+      "message": "resolver: 4/4 intent mappings correct",
+      "duration_s": 0.0
+    },
+    {
+      "label": "Q4 \u2014 Greeting skips retrieval (adaptive=on)",
+      "status": "PASS",
+      "message": "greeting skip: retriever never called; 'retrieval_skipped' fired",
+      "duration_s": 14.283
+    },
+    {
+      "label": "Q5 \u2014 Personal episodic bias re-sort",
+      "status": "PASS",
+      "message": "episodic bias: source_types broadened + lift event fired",
+      "duration_s": 6.66
+    },
+    {
+      "label": "Q6 \u2014 Ollama keep-alive plumbing",
+      "status": "PASS",
+      "message": "keep_alive: default + override + None all wire correctly",
+      "duration_s": 0.0
+    },
+    {
+      "label": "Q7 \u2014 Vector backend factory dispatch",
+      "status": "PASS",
+      "message": "factory: dispatches chroma + sqlite_vec; rejects unknown",
+      "duration_s": 0.029
+    },
+    {
+      "label": "Q8 \u2014 Backward compat (defaults off)",
+      "status": "PASS",
+      "message": "defaults preserved: adaptive off, keep_alive='30m', global=(10, 6)",
+      "duration_s": 0.0
+    }
+  ],
+  "timestamp": 1779096075.401096
+}

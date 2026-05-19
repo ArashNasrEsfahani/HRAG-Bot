@@ -1,0 +1,47 @@
+{
+  "phase": "6-B + 7-B/C",
+  "passed": 6,
+  "failed": 0,
+  "skipped": 0,
+  "total": 6,
+  "accepted": true,
+  "questions": [
+    {
+      "label": "Q1 \u2014 Per-intent retriever override + event",
+      "status": "PASS",
+      "message": "FACTUAL routed to bm25 (overriding vector); event fired",
+      "duration_s": 16.561
+    },
+    {
+      "label": "Q2 \u2014 Feedback analytics (function + API)",
+      "status": "PASS",
+      "message": "feedback_summary + API agree; \u22651 thumbs_up and \u22651 thumbs_down counted",
+      "duration_s": 14.979
+    },
+    {
+      "label": "Q3 \u2014 Ollama num_keep plumbing (inside options)",
+      "status": "PASS",
+      "message": "num_keep in options at 256; absent on None default",
+      "duration_s": 0.0
+    },
+    {
+      "label": "Q4 \u2014 Math-aware embedder selector + API",
+      "status": "PASS",
+      "message": "4 curated models present; dimension lookup works for known + unknown",
+      "duration_s": 0.003
+    },
+    {
+      "label": "Q5 \u2014 Nougat loader scaffold + status API",
+      "status": "PASS",
+      "message": "loader import is side-effect-free; availability=False; API agrees",
+      "duration_s": 0.008
+    },
+    {
+      "label": "Q6 \u2014 /api/config roundtrip on every new knob",
+      "status": "PASS",
+      "message": "all 5 new knobs roundtrip cleanly (embeddings_model patched in isolation)",
+      "duration_s": 15.1
+    }
+  ],
+  "timestamp": 1779104217.4761236
+}

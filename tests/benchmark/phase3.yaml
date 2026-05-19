@@ -1,0 +1,131 @@
+# Phase 3 (memory layer) acceptance benchmark.
+#
+# Self-contained: every test runs against an in-process orchestrator with
+# FakeLLM and FakeEmbedder patched in, real ChromaDB in a tmp directory.
+# No Ollama, no pre-populated corpus required.
+#
+# Run from project root:
+#   python tests/benchmark/run_phase3.py
+benchmark_version: 1
+description: >
+  Phase 3 — per-user memory layer. Verifies /remember writes, /recall semantic
+  search, profile rendering into the answer prompt, /forget tombstones,
+  per-user scoping, bulk import, preference extraction robustness, the KG
+  and quality-filter skip-for-episodic guards, and write-path latency.
+
+config_snapshot:
+  embedder: FakeEmbedder (hash-based, deterministic, 384-dim)
+  llm: FakeLLM (canned responses, no Ollama needed)
+  vector_store: real ChromaDB in per-test tmp dir
+  rerank_enabled: false   # we don't want CrossEncoder in the loop
+  doc_scope_enabled: false
+  kg_enabled: varied      # most tests false; t13 forces true
+  notes: |
+    Phase 3 is mostly integration-level around storage/retrieval glue.
+    Determinism > realism — FakeLLM + FakeEmbedder keeps every test
+    sub-second so the whole benchmark runs in <30 s on a laptop.
+
+tests:
+  # ----- write path ---------------------------------------------------------
+  - id: t01_remember_writes
+    category: memory_write
+    summary: "EpisodicMemoryStore.add() persists one chunk with source_type='episodic' and returns 'episodic:<uid>:<hex>'."
+    runner: t01_remember_writes
+    notes: "Sentinel against /remember silently dropping writes."
+
+  - id: t15_remember_latency_under_100ms
+    category: performance
+    summary: "Single /remember (FakeEmbedder) completes under 100 ms wall."
+    runner: t15_remember_latency_under_100ms
+    notes: "User invariant: /remember must feel instantaneous."
+
+  - id: t16_bulk_200_under_10s
+    category: performance
+    summary: "add_batch over 200 short notes (FakeEmbedder) finishes under 10 s wall."
+    runner: t16_bulk_200_under_10s
+    notes: "Stretch target — proves the bulk path scales without a per-note bottleneck."
+
+  # ----- read path ----------------------------------------------------------
+  - id: t02_recall_returns_relevant
+    category: memory_read
+    summary: "After 3 memories ingested, /recall on a topical query returns the on-topic chunk in the top result."
+    runner: t02_recall_returns_relevant
+    notes: "Validates the source_types='episodic' filter at retrieval time."
+
+  - id: t03_memory_competes_with_docs
+    category: memory_read
+    summary: "With source_types=None, an episodic memory matching the query out-ranks unrelated document chunks in the top-k."
+    runner: t03_memory_competes_with_docs
+    notes: "Default behaviour: memories compete in the same top-k as docs."
+
+  # ----- profile ------------------------------------------------------------
+  - id: t04_profile_upsert_idempotent
+    category: profile
+    summary: "Upsert on (user_id, topic, polarity) updates the existing row instead of creating a duplicate."
+    runner: t04_profile_upsert_idempotent
+    notes: "Backed by the UNIQUE index in db/migrations.py."
+
+  - id: t05_profile_render_grouped
+    category: profile
+    summary: "ProfileStore.render groups prefs by polarity (Facts / Style / Likes / Dislikes), drops below min_confidence, caps at max_items."
+    runner: t05_profile_render_grouped
+    notes: "Output goes verbatim into the answer prompt — keep the grouping stable."
+
+  - id: t06_context_builder_into_prompt
+    category: profile
+    summary: "Orchestrator.chat() renders the profile into the answer prompt at the {user_profile} placeholder (no longer the empty string)."
+    runner: t06_context_builder_into_prompt
+    notes: "End-to-end glue from preferences table to LLM-facing prompt."
+
+  # ----- forget path --------------------------------------------------------
+  - id: t07_forget_tombstones
+    category: forget
+    summary: "EpisodicMemoryStore.forget flips chunks.excluded=1 and the memory no longer appears in list_recent."
+    runner: t07_forget_tombstones
+    notes: "Tombstone semantics must hold across read paths."
+
+  - id: t08_forget_by_query
+    category: forget
+    summary: "forget_by_query returns chunk_ids of semantically-matching memories."
+    runner: t08_forget_by_query
+    notes: "/forget by free-text relies on this for confirmation flow."
+
+  # ----- scoping ------------------------------------------------------------
+  - id: t09_user_scoping
+    category: scoping
+    summary: "Memories under user 'alice' do not surface in count/list/recall for user 'bob' and vice versa."
+    runner: t09_user_scoping
+    notes: "Critical for multi-user safety."
+
+  # ----- bulk import --------------------------------------------------------
+  - id: t10_bulk_import_iter
+    category: bulk_import
+    summary: "_iter_memory_texts_from_path expands a temp folder of .md and .txt into multiple items; add_batch persists them."
+    runner: t10_bulk_import_iter
+    notes: "The 'remember a lot of documents fast' code path."
+
+  # ----- extraction ---------------------------------------------------------
+  - id: t11_extractor_robust_json
+    category: extraction
+    summary: "PreferenceExtractor parses markdown-fenced JSON and prose-prefixed JSON without crashing."
+    runner: t11_extractor_robust_json
+    notes: "Small local LLMs frequently wrap JSON in ```json fences."
+
+  - id: t12_auto_extractor_min_conf
+    category: extraction
+    summary: "SessionAutoExtractor does NOT upsert candidates below auto_extract_min_confidence."
+    runner: t12_auto_extractor_min_conf
+    notes: "Prevents low-signal noise from polluting the profile."
+
+  # ----- guards we added during 3.1 ----------------------------------------
+  - id: t13_kg_skip_episodic
+    category: guards
+    summary: "Ingesting a Document(source_type='episodic') with kg.enabled=true does NOT instantiate TripleExtractor."
+    runner: t13_kg_skip_episodic
+    notes: "Keeps /remember under 100 ms even on a KG-enabled corpus."
+
+  - id: t14_quality_skip_episodic
+    category: guards
+    summary: "A 3-token episodic memory survives the chunker even with chunking.quality.enabled=true (min_tokens=30 doesn't apply)."
+    runner: t14_quality_skip_episodic
+    notes: "Otherwise short notes like 'Postgres > MySQL' would be silently dropped at ingest."

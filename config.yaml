@@ -1,0 +1,219 @@
+# HRAG-Bot configuration. Edit values; environment variables override via HRAG_* prefix.
+llm:
+  provider: ollama          # ollama | openai | anthropic
+  model: yinw1590/gemma4-e2b-text  # 3.1 GB text-only gemma4 e2b (multimodal encoders stripped); fits fully on 8 GB GPU
+  temperature: 0.2
+  max_tokens: 2048  # generous cap; Ollama generates only what the model decides
+  num_ctx: 8192     # Ollama-only: caps KV-cache size. Without this Ollama uses the model's
+                    # max context (131k for gemma4) and allocates ~5 GB of VRAM for KV cache,
+                    # forcing CPU spill on 8 GB GPUs. 8192 covers hrag's realistic prompts.
+  # api_key: read from OPENAI_API_KEY / ANTHROPIC_API_KEY env vars when provider is openai/anthropic
+
+embeddings:
+  provider: sentence-transformers      # sentence-transformers | openai
+  model: sentence-transformers/all-mpnet-base-v2
+  dim: 768                              # informational; the impl reads from the model
+
+storage:
+  sqlite_path: data/store.sqlite
+  chroma_path: data/chroma
+  kg_path: data/kg
+  data_root: data
+
+retrieval:
+  top_k_vector: 12         # candidates returned by the retriever before reranking
+  top_k_final: 6           # chunks fed to the LLM after rerank. 15 → 6 (2026-05-17):
+                            # 15 chunks × ~400 tok ≈ 6k prompt tokens, decoding 1 tok over
+                            # that context was ~6 tok/s on gemma4:e2b-text. 6 chunks gets
+                            # us to ~2.5k prompt tokens → ~20+ tok/s decode.
+
+  # Retriever: how candidates are pulled from the corpus.
+  #   vector    -> dense embedding search (default; semantic)
+  #   bm25      -> sparse keyword search (instant, no embedding cost at query time)
+  #   hybrid    -> dense + bm25 fused via Reciprocal Rank Fusion (best quality, no LLM)
+  #   kg_ppr    -> Phase 2: NER -> Personalized PageRank over the KG (multi-hop)
+  #   community -> Phase 2: search GraphRAG community summaries (global queries)
+  #   router    -> Phase 2: classify query, route to kg_ppr/community/hybrid + RRF
+  #   taxonomy  -> Phase 2b: beam-search a user-editable category tree, then
+  #                chunk-fetch from the few docs at the picked leaves (fast at scale).
+  # Default: taxonomy (beam-searches the tree; falls back to vector when the
+  # tree is empty — build it once via `hrag taxonomy build`).
+  retriever: taxonomy
+  rrf_k: 60                # RRF smoothing constant (used when retriever=hybrid)
+  rrf_weights: null        # null = equal weights; or [1.0, 0.7] for vector/bm25
+
+  # Reranker: how candidates are re-scored after retrieval.
+  #   cross_encoder -> local cross-encoder model (default; ~100ms for 10 chunks, no LLM)
+  #   llm           -> per-chunk LLM scoring (slow, ~10 LLM calls per query)
+  #   batched_llm   -> single LLM call scoring all chunks at once (fewer calls, longer prompt)
+  reranker: cross_encoder
+  cross_encoder_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  rerank_enabled: true     # set false to skip reranking entirely (use top-k vector results directly)
+
+  # Threshold semantics depend on the reranker:
+  #   cross_encoder -> raw logit; -8.0 is permissive (only filter clearly off-topic)
+  #                   on academic papers, scores often range -10 to +5; -8 keeps
+  #                   borderline-relevant chunks the user can manually skim
+  #   llm / batched_llm -> integer 0-3 (set this to 2 if you switch reranker)
+  rerank_threshold: -8.0
+
+  # Query rewriting BEFORE retrieval. The bare user message often misses the
+  # antecedent of a follow-up question ("explain its architecture"); rewriting
+  # gives the embedder/reranker the context they need.
+  #   heuristic -> cheap rules: prepend the prior user message when the new
+  #                question looks like a follow-up. No LLM call. (default)
+  #   llm       -> one LLM call to produce a self-contained query. Slower but
+  #                handles cases the heuristic misses. Falls back to heuristic
+  #                if the LLM errors or returns empty.
+  #   none      -> passthrough; useful for benchmarking.
+  query_rewrite: heuristic
+
+  use_kg: false            # Phase 2 features
+  use_communities: false
+
+  # Document-scoped retrieval wrapper. When true, the built retriever is
+  # wrapped to (A) HARD-filter to docs whose title matches a known paper
+  # alias if the query names a paper, otherwise (B) coarse-rank docs by
+  # aggregated chunk score and restrict retrieval to the top-K docs. Falls
+  # through unchanged when neither regime matches (e.g. empty corpus).
+  doc_scope_enabled: false  # iter-1 regression: post-hoc filter dropped too many chunks; revisit with push-down filter
+
+chunking:
+  max_tokens: 400          # per chunk
+  overlap_tokens: 60
+  metadata_fusion: true    # HeteRAG: prepend title/section to embedded text
+
+  # If true, the chunker truncates the document at the first
+  # "References" / "Bibliography" / "Works Cited" heading. On academic PDFs
+  # this removes a long tail of citation-only chunks that pollute retrieval.
+  # Set to false to keep them — the per-chunk filters below still apply.
+  drop_after_references: true
+
+  # Chunk quality filter — drops low-value chunks after splitting
+  quality:
+    enabled: true
+    min_tokens: 30          # chunk must have at least this many tokens …
+    min_chars: 80           # … AND at least this many characters (both must fail to drop)
+    min_alpha_ratio: 0.4    # fraction of [a-zA-Z] chars; below this → table/equation noise
+    drop_references_sections: true   # drop any chunk whose section title is "References" etc.
+    drop_bibliography_chunks: true   # drop chunks that look like dense citation lists
+    drop_page_artifacts: true        # drop "Page 3 of 12" style headers/footers
+    dedupe: true            # drop exact-duplicate chunks within the same document
+
+context:
+  history_token_budget: 4000
+  gate_enabled: false      # Phase 4 features
+  compact_after_turns: 12
+
+user:
+  default_user_id: default
+
+# Phase 3 — per-user memory layer.
+# Episodic memories (notes, facts) live in the same chunks table with
+# source_type='episodic' and compete with documents in the same top-k at
+# retrieval time. The structured profile (preferences table) is rendered
+# verbatim into every answer prompt via the {user_profile} placeholder.
+memory:
+  auto_extract: false                # opt-in: PreferenceExtractor on session close (1 LLM call, daemon thread)
+  auto_extract_min_confidence: 0.7   # only upsert candidates above this confidence
+  profile_max_items: 12              # cap on preferences rendered into the prompt
+  profile_min_confidence: 0.5        # drop low-confidence prefs from the rendered profile
+  bulk_chunk_per_paragraph: true     # md mode for `hrag remember`: split on `## ` headers
+  forget_confirm: true               # /forget asks y/N before tombstoning by query
+
+# Intent-routing layer. A hybrid classifier (fast normalized-vocab path → LLM
+# fallback) routes every turn into one of GREETING / PERSONAL / FACTUAL /
+# UNCLEAR. The orchestrator additionally rewrites FACTUAL → GENERAL when the
+# top retrieval score is below `corpus_relevance_floor` (covers off-corpus
+# questions like "where is Tehran?" against an ML/AI library).
+intent:
+  enabled: true              # master switch; flip to false to bypass routing
+  fast_path_only: false      # true = regex/vocab only, no LLM fallback (cheaper)
+  llm_max_tokens: 30         # cap on the LLM classifier's output tokens
+  personal_top_k: 3          # episodic memories pulled on PERSONAL intents
+  corpus_relevance_floor: 0.15  # FACTUAL → GENERAL when top retrieval score
+                              #   (vector cosine, 0..1) is below this. 0.0 =
+                              #   never swap. 0.15 is conservative: only swap
+                              #   on clearly off-corpus queries like "where
+                              #   is Tehran?" against an ML/AI library.
+
+# Phase 2 — knowledge-graph hierarchical retrieval.
+# When enabled, ingest also extracts (head, relation, tail) triples per chunk
+# and builds a NetworkX graph with phrase + passage nodes. Three new retrievers
+# become available: kg_ppr (entity-specific multi-hop), community (global
+# sensemaking), and router (auto-picks per query).
+kg:
+  enabled: true               # master switch; flip to true to populate the graph
+  use_communities: true       # GraphRAG community detection + summarization.
+                              # Flip to true so 'community' / 'router'
+                              # retrievers can use community summaries.
+                              # Slow at ingest (~hour for 20 docs); communities
+                              # only help global/sensemaking queries.
+  parallel_workers: 8         # threads for concurrent triple-extraction LLM calls
+  ner: spacy                  # spacy (default) | llm. spaCy is fast & local;
+                              # llm uses Gemma for harder/scientific entities
+  damping: 0.5                # PPR damping factor (HippoRAG hyperparam)
+  synonym_threshold: 0.8      # cosine threshold for merging duplicate entities
+  leiden_seed: 42             # deterministic communities
+  community_levels:           # Leiden resolution levels for community detection
+    - 0                       # coarsest, broad themes
+    - 1                       # mid-grain, sub-topics
+    # level 2 dropped — analysis showed ~99% redundancy with levels 0/1
+  seed_top_k: 3                # broaden PPR seed; how many phrase nodes per
+                               # NER-extracted entity (top-K cosine matches).
+  passage_node_alpha: 0.5      # mix passage-node PPR (α) with phrase-aggregate
+                               # (1-α). Set to 0 if KG has no passage nodes.
+
+# Phase 2b — hierarchical document taxonomy.
+# LLM proposes a category tree over your documents; you edit it in the GUI.
+# At query time, the retriever beam-searches the tree top-down and only
+# opens chunks from documents under the picked leaves — fast even at 10k docs.
+# Build once via `hrag taxonomy build`. New docs are auto-filed on ingest.
+taxonomy:
+  enabled: true             # master switch; flip to true to enable
+  beam_width: 3              # branches kept at each tree level
+  max_depth: 6               # safety bound on descent
+  fallback_retriever: vector # used when the tree is empty / no leaves picked
+  auto_assign_on_ingest: true
+  include_episodic: true     # also file episodic memories (notes saved via
+                             # /remember) into the tree; default true since
+                             # personal memories belong alongside docs.
+  propose_sample_size: 80    # docs shown to the LLM in one proposal call
+  max_children_per_node: 12  # cap LLM-proposed branching factor
+  min_docs_per_leaf: 1
+  summary_max_chars: 280     # per-doc one-line summary length cap
+  use_llm_doc_summaries: false  # true = run a small LLM call per doc (slow with
+                                # Ollama since it serializes calls); default
+                                # false uses titles, which works well for
+                                # academic / technical corpora.
+  chunk_top_k_per_leaf: 8    # chunks fetched from each picked leaf
+  min_node_score: 0.05       # cosine threshold to keep descending a branch
+  beam_dominance_gap: 0.10   # adaptive beam: when the consecutive-score gap
+                              # exceeds this, drop every branch below the gap.
+                              # 0.10 means a clear top score like +0.37 will
+                              # narrow the beam to 1 even when beam_width=3.
+                              # Set to 0.0 to disable.
+  min_top_score_floor: 0.30  # if the BEST level-0 node scores below this,
+                              # the corpus has no real match for the query
+                              # (e.g. "hey!" against an academic library).
+                              # Narrow the beam to 1 in that case to avoid
+                              # opening huge swaths of unrelated docs.
+                              # Set to 0.0 to disable.
+  max_docs_pct: 0.40         # ceiling on the fraction of the corpus that the
+                              # picked leaves can collectively open. If the
+                              # taxonomy is imbalanced and one leaf holds, e.g.
+                              # 14/24 docs, drop the weakest leaves until the
+                              # opened set respects this cap. Set to 1.0 to
+                              # disable.
+
+# Phase 4 — compaction & gating (all default OFF; enable per feature).
+compaction:
+  gate_enabled: false         # RAGate: cheap LLM call that decides RETRIEVE vs SKIP
+  gate_max_tokens: 8
+  clue_enabled: false         # MemoRAG-style retrieval hypothesis used as the search query
+  clue_max_tokens: 200
+  dialog_mst_enabled: false   # turn-level history compaction when conversation exceeds budget
+  compact_after_turns: 12
+  keep_recent_turns: 6
+  summary_target_tokens: 400
+  mask_uncertain: false       # render [UNCERTAIN] tokens visibly in answers

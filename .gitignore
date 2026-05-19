@@ -1,0 +1,60 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- HRAG runtime state (per-user, machine-local, large) ---
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# --- Logs and scratch ---
+*.log
+_tree_preview*.html
+
+# --- Node (web tooling, if added later) ---
+node_modules/
+
+# --- Misc generated artifacts ---
+tests/benchmark/*.html
+!tests/benchmark/README.md
+
+# --- Claude Code project-local state (keep skills, drop local settings/locks) ---
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/cache/

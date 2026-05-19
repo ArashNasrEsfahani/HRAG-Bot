@@ -1,0 +1,41 @@
+{
+  "phase": "7-A",
+  "passed": 5,
+  "failed": 0,
+  "skipped": 0,
+  "total": 5,
+  "accepted": true,
+  "questions": [
+    {
+      "label": "Q1 \u2014 Unicode-glyph math detector",
+      "status": "PASS",
+      "message": "detector: 4/4 cases correct, min_signals filter works",
+      "duration_s": 0.191
+    },
+    {
+      "label": "Q2 \u2014 Live SQLite backfill effect",
+      "status": "PASS",
+      "message": "backfill: 63 of 1082 chunks tagged has_math=True",
+      "duration_s": 0.002
+    },
+    {
+      "label": "Q3 \u2014 Math-meta query expansion",
+      "status": "PASS",
+      "message": "expansion: 4/4 cases correct; math vocabulary tokens present",
+      "duration_s": 0.0
+    },
+    {
+      "label": "Q4 \u2014 Orchestrator math-meta filter + event",
+      "status": "PASS",
+      "message": "math_meta filter fires on meta queries, suppressed on non-meta",
+      "duration_s": 24.821
+    },
+    {
+      "label": "Q5 \u2014 Formula-extraction LLM pass",
+      "status": "PASS",
+      "message": "formula_extract event + 'Extracted formulas:' in answer",
+      "duration_s": 8.223
+    }
+  ],
+  "timestamp": 1779101018.7532268
+}

@@ -63,8 +63,9 @@ from hrag.config import Config
 from hrag.context.dialog_mst import DialogMSTCompactor
 from hrag.db.connection import Database, init_db
 from hrag.gating.clue import ClueGenerator
+from hrag.gating.combined import CombinedPreflight, PreflightDecision
 from hrag.gating.gate import RAGate
-from hrag.gating.uncertain import render_uncertain, strip_uncertain
+from hrag.gating.uncertain import extract_uncertain_spans, render_uncertain, strip_uncertain
 from hrag.ingest.pipeline import IngestPipeline
 from hrag.intent import Intent, IntentClassifier, IntentVerdict
 from hrag.interaction import InteractionStore, ReviewDecision, maybe_pause
@@ -102,6 +103,12 @@ Events emitted:
                         again only if the post-retrieval FACTUAL→GENERAL swap
                         fires (with extra "swapped_from" and "top_score" keys).
     "router_classify" — payload: {"label": str, "query": str}  # only when retriever=router
+    "router_short_circuit" — payload: {"label": str, "retriever": str}.
+                         Fires when retrieval.router_short_circuit=True AND the
+                         classifier returned "entity" or "global". Emitted by
+                         QueryRouter directly via its progress callback.
+                         "retriever" is the name of the single retriever called
+                         (e.g. "kg_ppr" for entity, "community" for global).
     "taxonomy_descend" — payload: {"trace": [...], "leaves": [...], "note": Optional[str]}
                          (only when retriever=taxonomy; same shape as
                           TaxonomyRetriever.describe_last_descend())
@@ -387,6 +394,26 @@ class Orchestrator:
             else None
         )
 
+        # Phase 9.6 — combined gate + clue + intent preflight. Only constructed
+        # when the flag is on AND every prerequisite (gate / clue / intent) is
+        # also enabled — otherwise the per-stage events the GUI subscribes to
+        # would have no defined source. ``decide()`` returns None on parse
+        # failure and the orchestrator falls back to the three separate calls.
+        self.combined_preflight: CombinedPreflight | None = (
+            CombinedPreflight(self.llm, max_tokens=cmp.combined_preflight_max_tokens)
+            if (
+                cmp.combined_preflight_enabled
+                and cmp.gate_enabled
+                and cmp.clue_enabled
+                and config.intent.enabled
+            )
+            else None
+        )
+        # Phase 9.13 — re-usable compactor for over-budget recovery even when
+        # the long-running dialog-MST flag is off. Lazily instantiated below
+        # the first time the budget is exceeded so cold paths pay nothing.
+        self._budget_compactor: DialogMSTCompactor | None = None
+
         # Phase 8 — interactive review store. Shared with the /resume HTTP
         # endpoint so the orchestrator thread (blocked on
         # ``wait_for_decision``) and the web thread (calling
@@ -431,6 +458,11 @@ class Orchestrator:
                     for q, e, a in _self_test_failures
                 ),
             )
+
+        # Phase 9.4 — Ollama warm-up + num_keep auto-tune.
+        # Delegated to a private method so tests can call it on a MagicMock
+        # instance without spinning up a full Orchestrator.
+        self._maybe_warmup_llm(config)
 
     # ------------------------------------------------------------------
     # Phase 6-B1 — per-intent retriever resolver
@@ -537,6 +569,19 @@ class Orchestrator:
             session_id = uuid.uuid4().hex
             self._create_session(session_id, user_id)
 
+        # Phase 9.3 — activate the per-session embedding cache for the whole
+        # turn. Retrievers nested below see this via the contextvar in
+        # ``hrag.providers.embeddings``; no signature changes required.
+        # Capture the token so we can reset on exit (test isolation: leaving
+        # the var set would leak the ambient session into other test cases
+        # that share the pytest process/thread).
+        _emb_token = None
+        try:
+            from hrag.providers.embeddings import _session_var as _emb_session_var  # noqa: PLC0415
+            _emb_token = _emb_session_var.set(session_id)
+        except Exception:  # noqa: BLE001
+            pass
+
         # 2. Persist the user's message.
         self._save_message(session_id, user_id, "user", question)
 
@@ -593,6 +638,23 @@ class Orchestrator:
                 },
             )
 
+        # 3b-i. Phase 9.6 — combined gate+clue+intent.
+        # When the flag is on AND no document-aware topic match short-circuits
+        # below, one LLM call returns all three decisions and stashes them for
+        # the existing branches to pick up. ``preflight_decision`` stays None
+        # when the combined call wasn't run, parsed badly, or was overridden by
+        # the topic detector — the three serial calls then fire as before.
+        preflight_decision: Optional[PreflightDecision] = None
+
+        # 3b-ii. Phase 9.2 — async pre-retrieval future bag.
+        # When ``retrieval.async_preflight_enabled`` is True AND the combined
+        # preflight is off, the three pre-retrieval LLM calls (gate, clue,
+        # classifier) are dispatched concurrently below; the per-stage blocks
+        # later in this function then ``.result()`` the future instead of
+        # making a fresh blocking call. ``async_preflight_results`` carries
+        # the resolved values so each block stays consumer-shaped.
+        async_preflight_results: dict[str, Any] = {}
+
         # 3c. Intent classification — decides retrieval scope and prompt template.
         # The classifier itself only ever returns GREETING / PERSONAL / FACTUAL /
         # UNCLEAR. GENERAL is a downstream rewrite of FACTUAL when retrieval
@@ -632,21 +694,86 @@ class Orchestrator:
                     question[:80], sorted(matched_topics),
                 )
             else:
-                # Phase 8.3 — feed the last 2 exchanges into the LLM prompt
-                # so it can recognise a personal follow-up, AND pass the
-                # previous turn's intent + memory entities so the
-                # follow-up entity fast path can short-circuit without
-                # an LLM call.
-                prev_intent_for_session = self._session_last_intent.get(session_id)
-                prev_entities_for_session: set[str] = set(
-                    self._session_memory_entities.get(session_id, [])
-                )
-                verdict = self.intent_classifier.classify(
-                    classifier_input,
-                    history=history_rows,
-                    prev_intent=prev_intent_for_session,
-                    prev_memory_entities=prev_entities_for_session,
-                )
+                # Phase 9.6 — combined preflight (one call returning intent +
+                # gate + clue). When it succeeds, we build the IntentVerdict
+                # from its result and stash gate/clue for the per-stage blocks
+                # below. The downstream code's `is not None` checks on
+                # ``self.gate`` / ``self.clue`` still gate the per-stage logic.
+                if self.combined_preflight is not None:
+                    preflight_history = [Message(role=r, content=c) for r, c in history_rows]
+                    preflight_decision = self.combined_preflight.decide(
+                        classifier_input, preflight_history
+                    )
+                if preflight_decision is not None:
+                    intent_str = preflight_decision.intent
+                    intent_map = {
+                        "factual": Intent.FACTUAL,
+                        "personal": Intent.PERSONAL,
+                        "greeting": Intent.GREETING,
+                        "unclear": Intent.UNCLEAR,
+                    }
+                    verdict = IntentVerdict(
+                        intent=intent_map.get(intent_str, Intent.UNCLEAR),
+                        confidence=0.85,
+                        source="combined_preflight",
+                        raw_label=intent_str,
+                    )
+                elif (
+                    cfg.retrieval.async_preflight_enabled
+                    and self.combined_preflight is None
+                ):
+                    # Phase 9.2 — dispatch the three pre-retrieval calls in
+                    # parallel. ``classify`` is what we MUST have to build the
+                    # verdict; the gate / clue futures are resolved later in
+                    # their own blocks. We let the executor stay alive for the
+                    # life of the chat() call so the per-stage blocks can read
+                    # the futures without re-instantiating threads.
+                    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+                    prev_intent_for_session = self._session_last_intent.get(session_id)
+                    prev_entities_for_session = set(
+                        self._session_memory_entities.get(session_id, [])
+                    )
+                    exec_msgs = [Message(role=r, content=c) for r, c in history_rows]
+                    pool = ThreadPoolExecutor(max_workers=3)
+                    async_preflight_results["_executor"] = pool
+                    if self.gate is not None:
+                        async_preflight_results["gate"] = pool.submit(
+                            self.gate.decide, question, exec_msgs
+                        )
+                    if self.clue is not None:
+                        async_preflight_results["clue"] = pool.submit(
+                            self.clue.generate, classifier_input, exec_msgs
+                        )
+                    fut = pool.submit(
+                        self.intent_classifier.classify,
+                        classifier_input,
+                        history=history_rows,
+                        prev_intent=prev_intent_for_session,
+                        prev_memory_entities=prev_entities_for_session,
+                    )
+                    verdict = fut.result()
+                    _emit("async_preflight", {
+                        "stages_dispatched": [
+                            k for k in ("gate", "clue") if k in async_preflight_results
+                        ] + ["intent"],
+                    })
+                else:
+                    # Phase 8.3 — feed the last 2 exchanges into the LLM prompt
+                    # so it can recognise a personal follow-up, AND pass the
+                    # previous turn's intent + memory entities so the
+                    # follow-up entity fast path can short-circuit without
+                    # an LLM call.
+                    prev_intent_for_session = self._session_last_intent.get(session_id)
+                    prev_entities_for_session: set[str] = set(
+                        self._session_memory_entities.get(session_id, [])
+                    )
+                    verdict = self.intent_classifier.classify(
+                        classifier_input,
+                        history=history_rows,
+                        prev_intent=prev_intent_for_session,
+                        prev_memory_entities=prev_entities_for_session,
+                    )
         else:
             # Disabled-by-config emergency bypass: treat everything as factual.
             verdict = IntentVerdict(
@@ -669,6 +796,23 @@ class Orchestrator:
             "raw_label": verdict.raw_label,
             "query": question,
         })
+
+        # 3c-bis. Phase 9.6 — late combined preflight.
+        # When intent was determined by the regex fast-path / named_topic path
+        # (so the LLM intent classifier was skipped), we still benefit from
+        # merging gate + clue into one LLM round-trip. Fire the combined call
+        # here unconditionally when the flag is on AND intent is FACTUAL AND
+        # we haven't already populated ``preflight_decision`` from the intent
+        # branch above.
+        if (
+            self.combined_preflight is not None
+            and preflight_decision is None
+            and intent == Intent.FACTUAL
+        ):
+            late_history = [Message(role=r, content=c) for r, c in history_rows]
+            preflight_decision = self.combined_preflight.decide(
+                question, late_history
+            )
 
         # 3d. Retrieval-policy dispatch.
         plan: RetrievalPlan = self.retrieval_policy.plan(intent)
@@ -709,15 +853,32 @@ class Orchestrator:
         # dataclasses.replace to produce a new instance.
         if self.gate is not None and intent == Intent.FACTUAL:
             t0 = time.time()
-            try:
-                gate_history = [Message(role=r, content=c) for r, c in history_rows]
-                gate_decision = self.gate.decide(question, gate_history)
-            except Exception:  # noqa: BLE001 — fail open so chat never breaks
-                logger.exception("RAGate failed; defaulting to RETRIEVE")
-                gate_decision = "RETRIEVE"
+            gate_source = "gate"
+            if preflight_decision is not None:
+                # Reuse the combined-preflight gate verdict (no extra LLM call).
+                gate_decision = preflight_decision.gate
+                gate_source = "combined"
+            elif "gate" in async_preflight_results:
+                try:
+                    gate_decision = async_preflight_results["gate"].result()
+                except Exception:  # noqa: BLE001
+                    logger.exception("Async RAGate failed; defaulting to RETRIEVE")
+                    gate_decision = "RETRIEVE"
+                gate_source = "async"
+            else:
+                try:
+                    gate_history = [Message(role=r, content=c) for r, c in history_rows]
+                    gate_decision = self.gate.decide(question, gate_history)
+                except Exception:  # noqa: BLE001 — fail open so chat never breaks
+                    logger.exception("RAGate failed; defaulting to RETRIEVE")
+                    gate_decision = "RETRIEVE"
             _emit(
                 "gate_check",
-                {"decision": gate_decision, "duration_s": time.time() - t0},
+                {
+                    "decision": gate_decision,
+                    "duration_s": time.time() - t0,
+                    "source": gate_source,
+                },
             )
             if gate_decision == "SKIP":
                 plan = dataclasses.replace(plan, scope="none")
@@ -748,18 +909,43 @@ class Orchestrator:
             and plan.scope != "none"
         ):
             t0 = time.time()
-            try:
-                clue_history = [Message(role=r, content=c) for r, c in history_rows]
-                clue_text = self.clue.generate(retrieval_query, clue_history)
-            except Exception:  # noqa: BLE001 — fail soft to the raw query
-                logger.exception("ClueGenerator failed; using raw query")
-                clue_text = retrieval_query
+            clue_source = "clue"
+            if preflight_decision is not None and preflight_decision.clue:
+                clue_text = preflight_decision.clue
+                clue_source = "combined"
+            elif "clue" in async_preflight_results:
+                try:
+                    clue_text = async_preflight_results["clue"].result()
+                except Exception:  # noqa: BLE001
+                    logger.exception("Async ClueGenerator failed; using raw query")
+                    clue_text = retrieval_query
+                clue_source = "async"
+            else:
+                try:
+                    clue_history = [Message(role=r, content=c) for r, c in history_rows]
+                    clue_text = self.clue.generate(retrieval_query, clue_history)
+                except Exception:  # noqa: BLE001 — fail soft to the raw query
+                    logger.exception("ClueGenerator failed; using raw query")
+                    clue_text = retrieval_query
             _emit(
                 "clue_generate",
-                {"clue": clue_text, "duration_s": time.time() - t0},
+                {
+                    "clue": clue_text,
+                    "duration_s": time.time() - t0,
+                    "source": clue_source,
+                },
             )
             if clue_text and clue_text.strip():
                 retrieval_query = clue_text
+
+        # Phase 9.2 — release the async preflight executor once both futures
+        # have been consumed (or skipped). Safe to call multiple times.
+        _pool = async_preflight_results.pop("_executor", None)
+        if _pool is not None:
+            try:
+                _pool.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
 
         results: list[RetrievalResult] = []
         fallback_used = False
@@ -805,6 +991,12 @@ class Orchestrator:
                 router_label_so_far = label
                 if progress:
                     _emit("router_classify", {"label": label, "query": retrieval_query})
+                # Phase 9.11 — wire the per-turn progress callback into the router
+                # so it can emit ``router_short_circuit`` events from inside
+                # retrieve(). The callback is cleared after retrieval to avoid
+                # stale references when progress is per-turn.
+                if hasattr(inner, "_progress"):
+                    inner._progress = _emit if progress else None
 
             t0 = time.time()
             # Adaptive top_k: when retrieval.adaptive_enabled is true, vec_k is
@@ -928,8 +1120,72 @@ class Orchestrator:
                 if not reranked and unreranked:
                     reranked = unreranked[: full_final_k]
                     fallback_used = True
+                    # Phase 9.9 — telemetry. Capture the chunk_ids the reranker
+                    # threw out so the user can mine which queries the
+                    # cross-encoder mis-scores.
+                    if cfg.retrieval.rerank_fallback_telemetry_enabled:
+                        try:
+                            self._log_rerank_fallback(
+                                turn_id=turn_id,
+                                session_id=session_id,
+                                user_id=user_id,
+                                query=retrieval_query,
+                                dropped_chunk_ids=[
+                                    r.chunk.chunk_id for r in unreranked
+                                ],
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception("rerank-fallback telemetry write failed")
 
                 results = reranked
+
+                # Phase 9.15 — feedback-weighted re-ranking.
+                # After the cross-encoder scores are final, nudge each result's
+                # rerank_score by EMA(thumbs_up - thumbs_down) for its chunk.
+                # Gated by cfg.retrieval.feedback_reranking_enabled (default OFF).
+                if cfg.retrieval.feedback_reranking_enabled and results:
+                    from hrag.feedback_scoring import (  # noqa: PLC0415
+                        FeedbackScorer,
+                        apply_feedback_to_rerank_score,
+                    )
+                    _fb_scorer = FeedbackScorer(
+                        self.db,
+                        alpha=cfg.retrieval.feedback_reranking_alpha,
+                    )
+                    _chunk_ids = [r.chunk.chunk_id for r in results]
+                    _fb_scores = _fb_scorer.score_many(_chunk_ids)
+                    _n_with_feedback = 0
+                    _score_shifts: list[float] = []
+                    for _r in results:
+                        _fs = _fb_scores.get(_r.chunk.chunk_id, 0.0)
+                        _r.feedback_score = _fs
+                        if _fs != 0.0:
+                            _n_with_feedback += 1
+                            _old = _r.rerank_score if _r.rerank_score is not None else 0.0
+                            _new = apply_feedback_to_rerank_score(
+                                _old, _fs,
+                                weight=cfg.retrieval.feedback_reranking_weight,
+                            )
+                            _score_shifts.append(_new - _old)
+                            _r.rerank_score = _new
+                    # Re-sort after nudge so ordering reflects adjusted scores.
+                    results.sort(
+                        key=lambda _r2: (
+                            _r2.rerank_score if _r2.rerank_score is not None else float("-inf"),
+                            _r2.score,
+                        ),
+                        reverse=True,
+                    )
+                    _mean_shift = (
+                        sum(_score_shifts) / len(_score_shifts)
+                        if _score_shifts else 0.0
+                    )
+                    _emit("feedback_rerank_applied", {
+                        "n_results": len(results),
+                        "n_with_feedback": _n_with_feedback,
+                        "mean_shift": round(_mean_shift, 4),
+                    })
+
                 _emit(
                     "rerank_done",
                     {
@@ -1281,6 +1537,68 @@ class Orchestrator:
                     dedup.append(r)
                 results = dedup
 
+        # 3d-iv. Phase 9.16 — CRAG-style automatic re-routing.
+        # Light, no-user-prompt cousin of Phase 8's pause: when the post-rerank
+        # top score is below the configured floor AND the user did NOT already
+        # steer the turn via the interactive review, do ONE rewrite + retry
+        # retrieval pass before falling through to the GENERAL swap. Capped at
+        # one retry by design.
+        if (
+            cfg.retrieval.crag_enabled
+            and review_decision.action == "continue"
+            and intent == Intent.FACTUAL
+            and plan.scope == "full"
+        ):
+            floor_crag = float(cfg.retrieval.crag_score_floor)
+            top_score_crag = max((r.score for r in results), default=0.0)
+            if not results or (floor_crag > 0.0 and top_score_crag < floor_crag):
+                t0 = time.time()
+                # Cheap heuristic broadening: ask the LLM (or the heuristic
+                # rewriter) for an alternative phrasing one more time, then
+                # retry retrieval with a wider top_k_vector.
+                try:
+                    crag_history = [Message(role=r, content=c) for r, c in history_rows]
+                    crag_query = self.query_rewriter.rewrite(
+                        question + " (alternative phrasing)",
+                        crag_history,
+                    )
+                except Exception:  # noqa: BLE001
+                    crag_query = retrieval_query
+                widened_k = max(
+                    int((adaptive_vec_k or cfg.retrieval.top_k_vector)
+                        * float(cfg.retrieval.crag_retry_top_k_multiplier)),
+                    cfg.retrieval.top_k_vector,
+                )
+                try:
+                    crag_results = self._pick_retriever_for_intent(intent).retrieve(
+                        crag_query,
+                        user_id,
+                        top_k=widened_k,
+                        intent_hint=intent,
+                    )
+                except Exception:  # noqa: BLE001
+                    crag_results = []
+                if crag_results:
+                    # Re-rank if we have a reranker; otherwise truncate.
+                    if self.reranker is not None:
+                        try:
+                            crag_results = self.reranker.rerank(
+                                crag_query,
+                                crag_results,
+                                threshold=cfg.retrieval.rerank_threshold,
+                                top_k=adaptive_final_k or cfg.retrieval.top_k_final,
+                            ) or crag_results[: cfg.retrieval.top_k_final]
+                        except Exception:  # noqa: BLE001
+                            crag_results = crag_results[: cfg.retrieval.top_k_final]
+                    results = crag_results
+                    retrieval_query = crag_query
+                _emit("crag_reroute", {
+                    "duration_s": time.time() - t0,
+                    "n_results_before": 0 if not results else len(results),
+                    "rewritten_query": crag_query,
+                    "widened_top_k": widened_k,
+                })
+
         # 3e. Post-retrieval re-route: a FACTUAL query that produced no
         # meaningfully-relevant results gets rewritten to GENERAL — the LLM
         # will then answer from world knowledge with a brief caveat instead
@@ -1408,6 +1726,66 @@ class Orchestrator:
                 question=question,
             )
 
+        # 8b. Phase 9.13 — context compression for over-budget prompts.
+        # When the rendered prompt blows past the configured budget, we collapse
+        # the oldest half of history via DialogMSTCompactor (lazily instantiated
+        # so the cold path pays nothing) AND drop the bottom-quartile of
+        # retrieved passages by rerank_score, then re-render the prompt. Capped
+        # at one pass — if it is still over budget, the model truncates and the
+        # user gets a partial answer rather than an OOM.
+        if (
+            cfg.compaction.context_compression_enabled
+            and len(prompt) > cfg.compaction.context_budget_chars
+            and intent == Intent.FACTUAL
+        ):
+            t0 = time.time()
+            chars_before = len(prompt)
+            results_before = len(results)
+            # Drop the lowest-scoring quartile of results.
+            if results:
+                k_keep = max(1, (len(results) * 3 + 3) // 4)
+                results = sorted(
+                    results,
+                    key=lambda r: (
+                        r.rerank_score if r.rerank_score is not None else r.score
+                    ),
+                    reverse=True,
+                )[:k_keep]
+            # Compress the oldest half of history.
+            compressed_history_rows = history_rows
+            if len(history_rows) >= 4:
+                if self._budget_compactor is None:
+                    self._budget_compactor = DialogMSTCompactor(
+                        self.llm,
+                        self.embedder,
+                        compact_after_turns=max(2, len(history_rows) // 2),
+                        keep_recent_turns=max(2, len(history_rows) // 2),
+                        summary_target_tokens=cfg.compaction.summary_target_tokens,
+                    )
+                try:
+                    msgs_in = [Message(role=r, content=c) for r, c in history_rows]
+                    msgs_out = self._budget_compactor.compact(msgs_in)
+                    compressed_history_rows = [(m.role, m.content) for m in msgs_out]
+                except Exception:  # noqa: BLE001
+                    logger.exception("Context compression: dialog compactor failed")
+            conversation_history = _format_history(compressed_history_rows)
+            # Re-render the prompt with the trimmed inputs.
+            retrieved_passages = _format_passages(results)
+            prompt = self.prompts.render(
+                Intent.FACTUAL,
+                user_profile=user_profile,
+                conversation_history=conversation_history,
+                retrieved_passages=retrieved_passages,
+                question=question,
+                detail_hint=_detail_hint(question),
+            )
+            _emit("context_compress", {
+                "chars_before": chars_before,
+                "chars_after": len(prompt),
+                "passages_dropped": results_before - len(results),
+                "duration_s": time.time() - t0,
+            })
+
         # 9. Generate (streaming or one-shot).
         # Per-intent token caps: greetings should be one or two sentences,
         # not a 2048-token essay. Keeps "hey" turns under a second on a
@@ -1423,6 +1801,7 @@ class Orchestrator:
         gen_max_tokens = _intent_max_tokens.get(intent)  # None → use cfg default
         t0 = time.time()
         _emit("generate_start", {"max_tokens": gen_max_tokens})
+        first_token_ms: Optional[float] = None  # Phase 9.10
         if stream:
             from hrag.types import GenerationRequest  # noqa: PLC0415
 
@@ -1432,15 +1811,64 @@ class Orchestrator:
             )
             parts: list[str] = []
             for piece in self.llm.generate_stream(req):
+                if first_token_ms is None and cfg.retrieval.first_token_latency_enabled:
+                    first_token_ms = (time.time() - t0) * 1000.0
                 parts.append(piece)
                 _emit("generate_token", {"token": piece})
             answer = "".join(parts)
         else:
             answer = self.llm.complete(prompt, max_tokens=gen_max_tokens)
-        _emit(
-            "generate",
-            {"duration_s": time.time() - t0, "answer_chars": len(answer)},
-        )
+        gen_payload: dict[str, Any] = {
+            "duration_s": time.time() - t0,
+            "answer_chars": len(answer),
+        }
+        if first_token_ms is not None:
+            gen_payload["first_token_ms"] = round(first_token_ms, 2)
+        _emit("generate", gen_payload)
+
+        # 9b-pre. Phase 9.17 — Self-RAG span re-retrieval.
+        # Run BEFORE render/strip_uncertain so we still have the raw
+        # ``[UNCERTAIN]`` tokens to anchor on. For each uncertain span we
+        # extract, run one extra retrieval pass and append the snippets as a
+        # "Sources for uncertain claims" block. Capped at
+        # ``self_rag_max_spans`` queries to bound latency.
+        if (
+            cfg.compaction.self_rag_enabled
+            and answer
+            and "[UNCERTAIN]" in answer
+            and intent in (Intent.FACTUAL, Intent.GENERAL)
+        ):
+            spans = extract_uncertain_spans(answer)[: cfg.compaction.self_rag_max_spans]
+            extra_blocks: list[str] = []
+            if spans:
+                t0 = time.time()
+                active_retriever_sr = self._pick_retriever_for_intent(intent)
+                for span in spans:
+                    try:
+                        span_results = active_retriever_sr.retrieve(
+                            span,
+                            user_id,
+                            top_k=3,
+                            intent_hint=intent,
+                        )
+                    except Exception:  # noqa: BLE001
+                        span_results = []
+                    if not span_results:
+                        continue
+                    extra_blocks.append(
+                        f"_For: \"{span[:120]}\"_\n" + _format_passages(span_results[:3])
+                    )
+                _emit("self_rag", {
+                    "n_spans": len(spans),
+                    "n_blocks_added": len(extra_blocks),
+                    "duration_s": time.time() - t0,
+                })
+            if extra_blocks:
+                answer = (
+                    answer
+                    + "\n\n---\n\n**Sources for uncertain claims:**\n\n"
+                    + "\n\n".join(extra_blocks)
+                )
 
         # 9b. Phase 4 — [UNCERTAIN] post-processing.
         # The answer prompt tells the LLM to write `[UNCERTAIN]` after any
@@ -1554,12 +1982,19 @@ class Orchestrator:
         # stays NULL on the no-pause / no-persistence happy path so existing
         # downstream readers see no change.
         assistant_metadata: Optional[str] = None
+        metadata_payload: dict[str, Any] = {}
         if (
             cfg.interaction.persistence_enabled
             and review_persistence is not None
         ):
+            metadata_payload.update(review_persistence)
+        if cfg.retrieval.first_token_latency_enabled and first_token_ms is not None:
+            metadata_payload["latency"] = {
+                "first_token_ms": round(first_token_ms, 2),
+            }
+        if metadata_payload:
             try:
-                assistant_metadata = json.dumps(review_persistence)
+                assistant_metadata = json.dumps(metadata_payload)
             except Exception:  # noqa: BLE001
                 assistant_metadata = None
         self._save_message(
@@ -1569,6 +2004,15 @@ class Orchestrator:
         self.db.commit()
 
         _emit("done", {"total_s": time.time() - t_start})
+
+        # Phase 9.3 — release the ambient session before returning so the
+        # contextvar does not leak across turns (or into other test cases).
+        if _emb_token is not None:
+            try:
+                from hrag.providers.embeddings import _session_var as _emb_session_var  # noqa: PLC0415
+                _emb_session_var.reset(_emb_token)
+            except Exception:  # noqa: BLE001
+                pass
 
         return ChatResult(
             answer=answer,
@@ -1617,6 +2061,33 @@ class Orchestrator:
                 (session_id, user_id, role, content, metadata),
             )
 
+    def _log_rerank_fallback(
+        self,
+        *,
+        turn_id: str,
+        session_id: str,
+        user_id: str,
+        query: str,
+        dropped_chunk_ids: list[str],
+    ) -> None:
+        """Insert a Phase-9.9 rerank-fallback telemetry row."""
+        with self.db.conn:
+            self.db.execute(
+                """
+                INSERT INTO rerank_fallback_events
+                    (event_id, turn_id, session_id, user_id, query, dropped_chunk_ids)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    turn_id,
+                    session_id,
+                    user_id,
+                    query,
+                    json.dumps(dropped_chunk_ids),
+                ),
+            )
+
     def _load_history(
         self, session_id: str, limit: int = 10
     ) -> list[tuple[str, str]]:
@@ -1648,6 +2119,62 @@ class Orchestrator:
         if pairs and pairs[-1][0] == "user":
             pairs = pairs[:-1]
         return pairs
+
+    # ------------------------------------------------------------------
+    # Phase 9.4 — Ollama warm-up + num_keep auto-tune
+    # ------------------------------------------------------------------
+
+    def _maybe_warmup_llm(self, cfg: Config) -> None:
+        """Pre-load the Ollama model into VRAM and optionally auto-set num_keep.
+
+        Split into its own method so tests can exercise the logic directly on a
+        MagicMock-based "orchestrator" without instantiating a full pipeline.
+
+        Warm-up: fires a 1-token chat() with the configured ``keep_alive`` so
+        the model is resident before the user's first turn.  Guarded by both the
+        config flag (``cfg.llm.warmup_on_init``) and a provider sniff
+        (``self.llm.name == "ollama"``).  Errors are logged at DEBUG and
+        silently swallowed — a missing/sleeping Ollama server must not crash
+        startup.
+
+        Auto-tune: when ``cfg.llm.num_keep_auto`` is True **and**
+        ``cfg.llm.num_keep`` is not already set, estimates the prefix length
+        from ``prompts/answer.md`` and stores it back into ``cfg.llm`` for the
+        session.
+        """
+        # --- auto-tune num_keep (runs before warmup so warmup picks it up) ---
+        if getattr(cfg.llm, "num_keep_auto", False) and not getattr(cfg.llm, "num_keep", None):
+            try:
+                from hrag.providers.llm import estimate_num_keep  # noqa: PLC0415
+
+                prompt_path = Path(__file__).parent / "prompts" / "answer.md"
+                prompt_text = prompt_path.read_text(encoding="utf-8")
+                prefix = prompt_text.split("{user_profile}")[0]
+                estimated = estimate_num_keep(prefix)
+                cfg.llm.num_keep = estimated
+                logger.debug(
+                    "[orchestrator] auto-set num_keep=%d from answer.md prefix", estimated
+                )
+            except Exception as exc:
+                logger.debug("[orchestrator] num_keep auto-tune skipped: %s", exc)
+
+        # --- warm-up ping ---
+        if (
+            getattr(cfg.llm, "warmup_on_init", True)
+            and getattr(self.llm, "name", "") == "ollama"
+        ):
+            try:
+                logger.debug("[orchestrator] firing Ollama warm-up ping for model=%s", cfg.llm.model)
+                self.llm.warmup()
+                logger.debug("[orchestrator] Ollama warm-up complete")
+            except Exception as exc:
+                logger.debug("[orchestrator] LLM warmup skipped: %s", exc)
+        else:
+            logger.debug(
+                "[orchestrator] LLM warmup skipped (warmup_on_init=%s, provider=%s)",
+                getattr(cfg.llm, "warmup_on_init", True),
+                getattr(self.llm, "name", "unknown"),
+            )
 
 
 # ---------------------------------------------------------------------------

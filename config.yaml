@@ -1,13 +1,18 @@
 # HRAG-Bot configuration. Edit values; environment variables override via HRAG_* prefix.
 llm:
-  provider: ollama          # ollama | openai | anthropic
+  provider: ollama          # ollama | openai | anthropic | openrouter | gemini
   model: yinw1590/gemma4-e2b-text  # 3.1 GB text-only gemma4 e2b (multimodal encoders stripped); fits fully on 8 GB GPU
   temperature: 0.2
   max_tokens: 2048  # generous cap; Ollama generates only what the model decides
   num_ctx: 8192     # Ollama-only: caps KV-cache size. Without this Ollama uses the model's
                     # max context (131k for gemma4) and allocates ~5 GB of VRAM for KV cache,
                     # forcing CPU spill on 8 GB GPUs. 8192 covers hrag's realistic prompts.
-  # api_key: read from OPENAI_API_KEY / ANTHROPIC_API_KEY env vars when provider is openai/anthropic
+  # api_key: shared fallback for openai / anthropic (reads from env vars if not set here)
+  # Per-provider keys — leave blank in committed config; set via env vars instead:
+  #   HRAG_LLM__OPENROUTER_API_KEY=sk-or-v1-...
+  #   HRAG_LLM__GEMINI_API_KEY=AIza...
+  openrouter_api_key: ""
+  gemini_api_key: ""
 
 embeddings:
   provider: sentence-transformers      # sentence-transformers | openai

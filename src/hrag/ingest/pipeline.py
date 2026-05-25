@@ -54,7 +54,7 @@ class VectorStore(Protocol):
 
 _SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}
 _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
-_EMBED_BATCH_SIZE = 32
+_EMBED_BATCH_SIZE = 8  # Smaller batches → more frequent progress events (was 32)
 
 
 def _mean_embedding(embeddings: list[list[float]]) -> list[float] | None:
@@ -147,7 +147,7 @@ class IngestPipeline:
             n_total=1,
             bytes=file_bytes,
         )
-        doc = load_document(path, user_id)
+        doc = load_document(path, user_id, cfg=self.config)
         _emit(
             "load",
             message="Document loaded",
@@ -273,6 +273,37 @@ class IngestPipeline:
                 n_dropped=0,
             )
 
+        # 2c. Phase 9.14 — Contextual Retrieval (Anthropic technique).
+        # Augment each chunk's embedding_text with an LLM-generated 50-100
+        # token "context line" describing its role in the parent document.
+        # Mutates chunk.embedding_text in place; chunk.text is left alone so
+        # downstream KG / taxonomy paths still see the original body
+        # (Phase-3 contracts 1 + 2). Episodic memories skip — they have no
+        # parent document to situate within.
+        if (
+            self.config.ingest.contextual_retrieval_enabled
+            and self.llm is not None
+            and doc.source_type != "episodic"
+            and chunks
+        ):
+            try:
+                from hrag.ingest.contextual import ContextualAugmenter  # noqa: PLC0415
+                augmenter = ContextualAugmenter(
+                    self.llm,
+                    self.db,
+                    max_doc_chars=self.config.ingest.contextual_retrieval_max_doc_chars,
+                    max_workers=self.config.ingest.contextual_retrieval_max_workers,
+                    max_context_tokens=self.config.ingest.contextual_retrieval_max_context_tokens,
+                    progress_cb=progress_cb,
+                )
+                chunks = augmenter.augment_chunks(chunks, doc.text)
+            except Exception as exc:  # noqa: BLE001 — never break ingest
+                logger.warning(
+                    "[ingest] contextual augmentation failed for %r (%s); "
+                    "continuing without contextual prefix",
+                    doc.title, exc,
+                )
+
         # 3. Upsert chunk rows
         self._upsert_chunks(chunks)
 
@@ -314,6 +345,8 @@ class IngestPipeline:
                     self.llm,
                     max_workers=self.config.kg.parallel_workers,
                     db=self.db,
+                    dedup_enabled=getattr(self.config.kg, "dedup_enabled", True),
+                    progress_cb=progress_cb,
                 )
                 triples = extractor.extract_batch(chunks)
                 chunk_id_to_doc_id = {c.chunk_id: c.doc_id for c in chunks}

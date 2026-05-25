@@ -149,8 +149,14 @@ const drawerScrim = $('drawer-scrim');
 const userPillBtn = $('user-pill');
 
 // settings drawer fields
-const cfgProvider = $('cfg-provider');
+const cfgProviderSelect = $('cfg-provider-select');
 const cfgModel = $('cfg-model');
+const cfgOpenRouterRow = $('openrouter-row');
+const cfgOpenRouterKey = $('cfg-openrouter-key');
+const cfgOpenRouterKeySave = $('cfg-openrouter-key-save');
+const cfgGeminiRow = $('gemini-row');
+const cfgGeminiKey = $('cfg-gemini-key');
+const cfgGeminiKeySave = $('cfg-gemini-key-save');
 const cfgNumCtx = $('cfg-num-ctx');
 const cfgThink = $('cfg-think');
 const cfgRetriever = $('cfg-retriever');
@@ -430,6 +436,35 @@ initTheme();
     await patchConfig({ model: cfgModel.value });
     flashToast(`switched LLM → ${cfgModel.value}`);
   });
+  if (cfgProviderSelect) {
+    cfgProviderSelect.addEventListener('change', async () => {
+      const p = cfgProviderSelect.value;
+      await patchConfig({ provider: p });
+      syncOpenRouterRow(p);
+      await loadLLMModels();
+      flashToast(`provider → ${p}`);
+    });
+  }
+  if (cfgOpenRouterKeySave) {
+    cfgOpenRouterKeySave.addEventListener('click', async () => {
+      const key = cfgOpenRouterKey?.value?.trim();
+      if (!key) return;
+      await patchConfig({ openrouter_api_key: key });
+      await loadOpenRouterModels();
+      cfgOpenRouterKey.value = '';
+      flashToast('OpenRouter API key saved');
+    });
+  }
+  if (cfgGeminiKeySave) {
+    cfgGeminiKeySave.addEventListener('click', async () => {
+      const key = cfgGeminiKey?.value?.trim();
+      if (!key) return;
+      await patchConfig({ gemini_api_key: key });
+      await loadGeminiModels();
+      cfgGeminiKey.value = '';
+      flashToast('Gemini API key saved');
+    });
+  }
   cfgNumCtx.addEventListener('change', () => patchConfig({ num_ctx: parseInt(cfgNumCtx.value, 10) }));
   cfgThink.addEventListener('change', () => patchConfig({ think: cfgThink.checked }));
   cfgRetriever.addEventListener('change', async () => {
@@ -640,7 +675,8 @@ async function loadConfig() {
 }
 
 function paintConfig(c) {
-  cfgProvider.textContent = c.llm.provider;
+  if (cfgProviderSelect) cfgProviderSelect.value = c.llm.provider;
+  syncOpenRouterRow(c.llm.provider);
   // cfgModel options are populated by loadLLMModels(); we just sync `value`.
   if (cfgModel.querySelector(`option[value="${CSS.escape(c.llm.model)}"]`)) {
     cfgModel.value = c.llm.model;
@@ -753,6 +789,15 @@ function syncFormulaEnabled() {
 }
 
 async function loadLLMModels() {
+  const provider = state.config?.llm?.provider || 'ollama';
+  if (provider === 'openrouter') {
+    await loadOpenRouterModels();
+    return;
+  }
+  if (provider === 'gemini') {
+    await loadGeminiModels();
+    return;
+  }
   try {
     const r = await fetch('/api/llm/models');
     const data = await r.json();
@@ -774,6 +819,72 @@ async function loadLLMModels() {
     }
     if (state.config?.llm?.model) cfgModel.value = state.config.llm.model;
   } catch (e) { console.error('llm models load failed', e); }
+}
+
+async function loadOpenRouterModels() {
+  try {
+    const r = await fetch('/api/llm/openrouter/models');
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      cfgModel.innerHTML = '<option value="">(enter API key above to load models)</option>';
+      return;
+    }
+    const models = data.models || [];
+    cfgModel.innerHTML = '';
+    if (!models.length) {
+      const opt = document.createElement('option');
+      opt.textContent = state.config?.llm?.model || '(no free models found)';
+      opt.value = state.config?.llm?.model || '';
+      cfgModel.appendChild(opt);
+    } else {
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        const ctx = m.context_length ? ` · ${(m.context_length / 1000).toFixed(0)}k ctx` : '';
+        opt.textContent = `${m.name}${ctx}`;
+        cfgModel.appendChild(opt);
+      }
+    }
+    if (data.current) cfgModel.value = data.current;
+  } catch (e) { console.error('openrouter models load failed', e); }
+}
+
+async function loadGeminiModels() {
+  try {
+    const r = await fetch('/api/llm/gemini/models');
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      cfgModel.innerHTML = '<option value="">(enter API key above to load models)</option>';
+      return;
+    }
+    const models = data.models || [];
+    cfgModel.innerHTML = '';
+    if (!models.length) {
+      const opt = document.createElement('option');
+      opt.textContent = state.config?.llm?.model || '(no models found)';
+      opt.value = state.config?.llm?.model || '';
+      cfgModel.appendChild(opt);
+    } else {
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        const ctx = m.context_length ? ` · ${(m.context_length / 1000).toFixed(0)}k ctx` : '';
+        opt.textContent = `${m.name}${ctx}`;
+        cfgModel.appendChild(opt);
+      }
+    }
+    if (data.current) cfgModel.value = data.current;
+  } catch (e) { console.error('gemini models load failed', e); }
+}
+
+function syncOpenRouterRow(provider) {
+  // Show/hide the key rows based on active provider + whether key is pre-configured.
+  const orKeySet = !!state.config?.llm?.openrouter_key_set;
+  const gKeySet  = !!state.config?.llm?.gemini_key_set;
+  if (cfgOpenRouterRow) cfgOpenRouterRow.style.display =
+    (provider === 'openrouter' && !orKeySet) ? '' : 'none';
+  if (cfgGeminiRow) cfgGeminiRow.style.display =
+    (provider === 'gemini' && !gKeySet) ? '' : 'none';
 }
 
 async function loadEmbeddingSuggestions() {
@@ -855,6 +966,16 @@ async function loadNougatStatus() {
     if (cfgNougatModel && document.activeElement !== cfgNougatModel && data.model) {
       if (!cfgNougatModel.value) cfgNougatModel.value = data.model;
     }
+    // Update upload zone Nougat parser option.
+    const uploadNougatInput = document.querySelector('#upload-method-options input[name="pdfparser"][value="nougat"]');
+    const uploadNougatLabel = document.getElementById('nougat-parser-label');
+    const uploadNougatBadge = document.getElementById('nougat-badge');
+    if (uploadNougatInput) uploadNougatInput.disabled = !data.available;
+    if (uploadNougatLabel) uploadNougatLabel.title = data.available ? 'Nougat OCR — LaTeX-aware PDF parser' : 'Nougat OCR — not installed (pip install nougat-ocr)';
+    if (uploadNougatBadge) {
+      uploadNougatBadge.textContent = data.available ? 'installed' : 'not installed';
+      uploadNougatBadge.classList.toggle('installed', !!data.available);
+    }
   } catch (e) {
     console.error('nougat status load failed', e);
     nougatStatusBadge.classList.remove('installed', 'missing');
@@ -885,8 +1006,14 @@ async function patchConfig(patch) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    state.config = await r.json();
-    paintConfig(state.config);
+    const data = await r.json();
+    if (r.ok) {
+      state.config = data;
+      paintConfig(state.config);
+    } else {
+      console.warn('patchConfig rejected:', data?.detail || data);
+      flashToast('Config error: ' + (data?.detail || 'unknown'));
+    }
   } catch (e) { console.error('config patch failed', e); }
 }
 
@@ -2711,7 +2838,7 @@ async function loadDocs() {
 
 function paintDocs(items) {
   if (!items.length) {
-    docsListEl.innerHTML = '<div class="drawer-empty"><div class="e-icon">📄</div>No documents ingested.<br><span style="color:var(--muted-2)">Run <code>hrag ingest &lt;path&gt;</code></span></div>';
+    docsListEl.innerHTML = '<div class="drawer-empty"><div class="e-icon">📄</div>No documents ingested.<br><span style="color:var(--muted-2)">Drop files above or run <code>hrag ingest</code></span></div>';
     return;
   }
   docsListEl.innerHTML = '';
@@ -2726,8 +2853,21 @@ function paintDocs(items) {
     const meta = document.createElement('span');
     meta.className = 'doc-meta';
     meta.textContent = `${d.n_chunks ?? 0} chunks`;
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'doc-card-del';
+    delBtn.title = 'Delete document';
+    delBtn.setAttribute('aria-label', 'Delete ' + (d.title || 'document'));
+    delBtn.innerHTML = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>';
+    delBtn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      await confirmDeleteDoc(d);
+      await loadDocs();
+      refreshSidebarCounts();
+    });
     head.appendChild(title);
     head.appendChild(meta);
+    head.appendChild(delBtn);
     const path = document.createElement('div');
     path.className = 'doc-path';
     path.textContent = d.source_path || '';
@@ -3216,24 +3356,67 @@ function promptTaxonomyChoice(docId, title) {
   autoBtn.textContent = 'Auto-assign';
   autoBtn.addEventListener('click', async () => {
     autoBtn.disabled = true;
-    autoBtn.textContent = 'Assigning…';
+    autoBtn.textContent = 'Queuing…';
     try {
       const r = await fetch(
-        '/api/taxonomy/auto-assign/' + encodeURIComponent(docId),
+        '/api/taxonomy/auto-assign/' + encodeURIComponent(docId) + '?background=true',
         { method: 'POST' },
       );
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
-      flashToast && flashToast(
-        data.assigned_node
-          ? 'Filed under ' + data.assigned_node
-          : 'Tree empty — still unfiled'
-      );
-      banner.remove();
-      // Reload the tree so the doc moves out of the unfiled list.
-      if (typeof loadTaxonomyTree === 'function') {
-        try { await loadTaxonomyTree(); } catch { /* ignore */ }
+      if (!data.background) {
+        // Synchronous fallback (shouldn't happen with ?background=true).
+        flashToast && flashToast(
+          data.assigned_node
+            ? 'Filed under ' + data.assigned_node
+            : 'Tree empty — still unfiled'
+        );
+        banner.remove();
+        if (typeof loadTaxonomyTree === 'function') {
+          try { await loadTaxonomyTree(); } catch { /* ignore */ }
+        }
+        return;
       }
+      const jobId = data.job_id;
+      // Poll until the taxonomy-assign job finishes.
+      for (let i = 0; i < 600; i++) {
+        await new Promise(res => setTimeout(res, 1000));
+        let job;
+        try {
+          const pr = await fetch('/api/jobs/' + jobId);
+          if (!pr.ok) throw new Error('HTTP ' + pr.status);
+          job = await pr.json();
+        } catch (pe) {
+          autoBtn.disabled = false;
+          autoBtn.textContent = 'Auto-assign';
+          flashToast && flashToast('auto-assign poll failed: ' + (pe.message || pe));
+          return;
+        }
+        if (job.status === 'running' || job.status === 'queued') {
+          autoBtn.textContent = job.message || 'Assigning…';
+          continue;
+        }
+        if (job.status === 'done') {
+          const nodeId = job.result && job.result.assigned_node;
+          flashToast && flashToast(
+            nodeId ? 'Filed under ' + nodeId : 'Tree empty — still unfiled'
+          );
+          banner.remove();
+          if (typeof loadTaxonomyTree === 'function') {
+            try { await loadTaxonomyTree(); } catch { /* ignore */ }
+          }
+          return;
+        }
+        // failed
+        autoBtn.disabled = false;
+        autoBtn.textContent = 'Auto-assign';
+        flashToast && flashToast('auto-assign failed: ' + (job.message || 'error'));
+        return;
+      }
+      // Timeout
+      autoBtn.disabled = false;
+      autoBtn.textContent = 'Auto-assign';
+      flashToast && flashToast('auto-assign timed out — check the Jobs drawer');
     } catch (e) {
       autoBtn.disabled = false;
       autoBtn.textContent = 'Auto-assign';
@@ -3271,14 +3454,34 @@ function _readTaxonomyMode() {
   } catch { return 'auto'; }
 }
 
+// Reads the upload zone's ingestion method options (PDF parser + contextual).
+// Returns { useNougat: bool|null, contextual: bool|null } where null means
+// "use the global config default" (no override sent to the server).
+function _readIngestMethod() {
+  try {
+    const parserPicked = document.querySelector(
+      '#upload-method-options input[name="pdfparser"]:checked'
+    );
+    const parser = parserPicked ? parserPicked.value : null;
+    const ctxEl = document.getElementById('upload-contextual');
+    // Only override contextual when the checkbox is explicitly checked;
+    // unchecked = use server default (don't send false, send nothing).
+    const contextual = ctxEl && ctxEl.checked ? true : null;
+    // Map parser choice → use_nougat override.
+    const useNougat = parser === 'nougat' ? true : (parser === 'pymupdf' ? false : null);
+    return { useNougat, contextual };
+  } catch { return { useNougat: null, contextual: null }; }
+}
+
 async function handleUploadFiles(fileList) {
   if (!fileList || !fileList.length) return;
   const files = Array.from(fileList);
   uploadProgressEl.innerHTML = '';
 
   const taxMode = _readTaxonomyMode();
+  const method = _readIngestMethod();
   // Kick off all uploads in parallel — server runs each as a daemon thread.
-  await Promise.all(files.map(f => uploadOne(f, taxMode)));
+  await Promise.all(files.map(f => uploadOne(f, taxMode, method)));
 
   // refresh listings after all jobs settle
   await loadDocs();
@@ -3286,7 +3489,7 @@ async function handleUploadFiles(fileList) {
   uploadInputEl.value = '';  // allow re-uploading the same file
 }
 
-async function uploadOne(f, taxMode = 'auto') {
+async function uploadOne(f, taxMode = 'auto', method = {}) {
   const row = document.createElement('div');
   row.className = 'upload-row pending';
   row.innerHTML = `
@@ -3299,8 +3502,11 @@ async function uploadOne(f, taxMode = 'auto') {
   try {
     const form = new FormData();
     form.append('file', f);
-    const url = '/api/ingest?background=true&taxonomy_mode=' +
+    let url = '/api/ingest?background=true&taxonomy_mode=' +
       encodeURIComponent(taxMode);
+    if (method.useNougat === true)  url += '&use_nougat=true';
+    if (method.useNougat === false) url += '&use_nougat=false';
+    if (method.contextual === true) url += '&contextual=true';
     const r = await fetch(url, { method: 'POST', body: form });
     if (!r.ok) throw new Error(await r.text() || ('HTTP ' + r.status));
     const { job_id } = await r.json();
@@ -3524,6 +3730,15 @@ const taxOptInputs = {
   min_top_score_floor: $('tax-opt-floor'),
   max_docs_pct: $('tax-opt-pct'),
 };
+
+// Collect all leaf nodes from the raw tree JSON (DFS).
+// Returns [{id, label}] sorted by label.
+function collectLeafNodes(node, result = []) {
+  if (!node) return result;
+  if (node.is_leaf) result.push({ id: node.id, label: node.label || String(node.id) });
+  if (node.children) for (const c of node.children) collectLeafNodes(c, result);
+  return result;
+}
 
 const taxState = {
   treeRaw: null,        // raw API response
@@ -4043,6 +4258,16 @@ function buildPopoverDocChip(doc) {
   chip.dataset.docId = doc.doc_id;
   chip.title = doc.title || doc.doc_id;
 
+  // Drag handle (only meaningful for non-episodic docs — episodics are pinned).
+  if (!episodic) {
+    const grip = document.createElement('span');
+    grip.className = 'tax-doc-chip-grip';
+    grip.title = 'Drag to a leaf node to refile';
+    grip.setAttribute('aria-hidden', 'true');
+    grip.textContent = '⋮⋮';
+    chip.appendChild(grip);
+  }
+
   const icon = document.createElement('span');
   icon.className = 'tax-doc-chip-icon';
   icon.textContent = episodic ? '🧠' : '📄';
@@ -4061,6 +4286,14 @@ function buildPopoverDocChip(doc) {
   viewBtn.setAttribute('aria-label', 'Preview');
   viewBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>';
 
+  // Move-to button — opens a leaf-node picker inline
+  const moveBtn = document.createElement('button');
+  moveBtn.type = 'button';
+  moveBtn.className = 'tax-doc-chip-btn';
+  moveBtn.title = 'Move to another node';
+  moveBtn.setAttribute('aria-label', 'Move to another node');
+  moveBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
+
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
   delBtn.className = 'tax-doc-chip-btn tax-doc-chip-del';
@@ -4069,6 +4302,8 @@ function buildPopoverDocChip(doc) {
   delBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/></svg>';
 
   actions.appendChild(viewBtn);
+  // Move-to button comes before delete
+  if (!episodic) actions.appendChild(moveBtn);
   if (episodic) {
     const editBtn = document.createElement('button');
     editBtn.type = 'button';
@@ -4091,6 +4326,87 @@ function buildPopoverDocChip(doc) {
   icon.addEventListener('click', openPreview);
   viewBtn.addEventListener('click', openPreview);
 
+  // Move-to: open a native <select> dropdown for guaranteed reliability.
+  // Native selects render in a browser-managed layer (no overflow clipping,
+  // no race conditions, focus + keyboard + screen-reader work for free).
+  async function performMoveTo(leafId, leafLabel) {
+    moveBtn.disabled = true;
+    console.log('[hrag-tax] move-doc click', { doc_id: doc.doc_id, node_id: leafId });
+    try {
+      const r = await fetch('/api/taxonomy/move-doc', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_id: doc.doc_id, node_id: leafId }),
+      });
+      if (!r.ok) {
+        let msg = 'HTTP ' + r.status;
+        try { const b = await r.json(); msg = b.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+      flashToast('Moved to “' + leafLabel + '”');
+      if (_popoverNodeId) {
+        const dr = await fetch(`/api/taxonomy/nodes/${encodeURIComponent(_popoverNodeId)}/docs`);
+        if (dr.ok) { _popoverDocs = await parseDocsResponse(dr); renderPopoverDocs(); }
+      }
+      await loadTaxonomyTree();
+    } catch (e) {
+      moveBtn.disabled = false;
+      console.error('[hrag-tax] move-doc failed', e);
+      flashToast('Move failed: ' + (e.message || e));
+    }
+  }
+
+  moveBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    // Toggle: an open select for this chip is stored as chip.nextElementSibling
+    const existing = chip.nextElementSibling?.classList.contains('chip-move-select-wrap')
+      ? chip.nextElementSibling : null;
+    if (existing) { existing.remove(); return; }
+    document.querySelectorAll('.chip-move-select-wrap').forEach(el => el.remove());
+
+    const allLeaves = taxState.treeRaw?.root
+      ? collectLeafNodes(taxState.treeRaw.root)
+      : [];
+    const leaves = allLeaves
+      .filter(l => String(l.id) !== String(_popoverNodeId))
+      .sort((a, b) => a.label.localeCompare(b.label));
+
+    const wrap = document.createElement('div');
+    wrap.className = 'chip-move-select-wrap';
+
+    if (!leaves.length) {
+      wrap.textContent = 'No other leaf nodes available.';
+      chip.after(wrap);
+      return;
+    }
+
+    const sel = document.createElement('select');
+    sel.className = 'chip-move-select';
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = 'Move to leaf…';
+    ph.disabled = true;
+    ph.selected = true;
+    sel.appendChild(ph);
+    for (const leaf of leaves) {
+      const opt = document.createElement('option');
+      opt.value = leaf.id;
+      opt.textContent = leaf.label;
+      opt.dataset.label = leaf.label;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', async () => {
+      const leafId = sel.value;
+      const leafLabel = sel.options[sel.selectedIndex].dataset.label || leafId;
+      wrap.remove();
+      await performMoveTo(leafId, leafLabel);
+    });
+    wrap.appendChild(sel);
+    chip.after(wrap);
+    // Open the native dropdown immediately so the user can pick in one click.
+    sel.focus();
+    try { sel.showPicker?.(); } catch { /* showPicker is Chromium-only */ }
+  });
+
   delBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
     confirmDeleteDoc(doc);
@@ -4098,11 +4414,47 @@ function buildPopoverDocChip(doc) {
 
   if (!episodic) {
     chip.addEventListener('dragstart', (ev) => {
-      ev.dataTransfer.setData('text/x-tax-doc', String(doc.doc_id));
-      ev.dataTransfer.effectAllowed = 'move';
+      console.log('[hrag-tax] dragstart', doc.doc_id);
+      // Belt-and-suspenders: dataTransfer can be empty cross-browser during
+      // `dragover` (Firefox in particular), so we also stash the doc id on a
+      // window-level variable. The `drop` handler reads either source.
+      try {
+        ev.dataTransfer.setData('text/x-tax-doc', String(doc.doc_id));
+        ev.dataTransfer.setData('text/plain', String(doc.doc_id));
+        ev.dataTransfer.effectAllowed = 'move';
+      } catch (e) {
+        console.warn('[hrag-tax] dataTransfer.setData threw', e);
+      }
+      window.__hragDraggedDocId = String(doc.doc_id);
       chip.classList.add('dragging');
+      // Fully hide the popover (visibility:hidden via .drag-ghost) so it stops
+      // covering tree nodes both visually and event-wise. The drag image was
+      // already captured at dragstart, so the chip can disappear safely.
+      taxPopover.classList.add('drag-ghost');
+      // Highlight ALL leaf nodes (including the current one — moving onto the
+      // same leaf is a no-op rather than an error).
+      if (taxNodesLayer) {
+        taxNodesLayer.querySelectorAll('g.tax-node').forEach(gEl => {
+          const nid = gEl.dataset.id;
+          const n = taxState.nodeMap && taxState.nodeMap.get(nid);
+          if (n && n.data.is_leaf) {
+            gEl.classList.add('drop-target-hint');
+          }
+        });
+      }
     });
-    chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
+    chip.addEventListener('dragend', () => {
+      console.log('[hrag-tax] dragend', doc.doc_id);
+      chip.classList.remove('dragging');
+      taxPopover.classList.remove('drag-ghost');
+      window.__hragDraggedDocId = null;
+      if (taxNodesLayer) {
+        taxNodesLayer.querySelectorAll('g.tax-node.drop-target-hint')
+          .forEach(gEl => gEl.classList.remove('drop-target-hint'));
+        taxNodesLayer.querySelectorAll('g.tax-node.doc-drop-hover')
+          .forEach(gEl => gEl.classList.remove('doc-drop-hover'));
+      }
+    });
   }
   return chip;
 }
@@ -4399,6 +4751,18 @@ async function togglePopoverPicker(picker, btn) {
   picker.hidden = false;
   picker.innerHTML = '<div class="tax-pop-empty">loading…</div>';
 
+  // Guard: docs can only be assigned to leaf nodes.
+  if (_popoverNodeId) {
+    const popNode = taxState.nodeMap && taxState.nodeMap.get(_popoverNodeId);
+    if (popNode && !popNode.data.is_leaf) {
+      picker.innerHTML =
+        '<div class="tax-pop-empty" style="color:var(--warn,#e0a050);text-align:center;padding:10px 8px">'
+        + 'Documents can only be filed under leaf nodes.<br>'
+        + 'First convert this node to a leaf (remove its children) or select a child node.</div>';
+      return;
+    }
+  }
+
   // Build node_id → label map for "currently at" display
   const nodeLabel = (id) => {
     if (!id) return 'unfiled';
@@ -4555,38 +4919,78 @@ document.addEventListener('mousedown', (e) => {
 });
 
 // ---- doc chip → node drop ----
-// node cards accept doc chips via native HTML5 drag/drop
+// Node cards accept doc chips via native HTML5 drag/drop.
+// We treat a drag as a doc-drag when EITHER the dataTransfer carries our
+// custom MIME-type OR `window.__hragDraggedDocId` is set — Firefox sometimes
+// hides custom types from `dragover` events, so the JS-side fallback keeps
+// the drop alive cross-browser.
+function _hragDragHasDoc(e) {
+  if (window.__hragDraggedDocId) return true;
+  try {
+    return !!(e.dataTransfer && e.dataTransfer.types &&
+      (e.dataTransfer.types.includes('text/x-tax-doc') ||
+       (e.dataTransfer.types.contains && e.dataTransfer.types.contains('text/x-tax-doc'))));
+  } catch { return false; }
+}
 document.addEventListener('dragover', (e) => {
   if (document.body.dataset.view !== 'taxonomy') return;
+  if (!_hragDragHasDoc(e)) return;
   const g = e.target.closest && e.target.closest('g.tax-node');
   if (!g) return;
-  if (!e.dataTransfer.types.includes('text/x-tax-doc')) return;
   e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  // Strip any stale hover from sibling nodes before painting the new one.
+  if (taxNodesLayer) {
+    taxNodesLayer.querySelectorAll('g.tax-node.doc-drop-hover').forEach(el => {
+      if (el !== g) el.classList.remove('doc-drop-hover');
+    });
+  }
   g.classList.add('doc-drop-hover');
 });
 document.addEventListener('dragleave', (e) => {
   const g = e.target.closest && e.target.closest('g.tax-node');
-  if (g) g.classList.remove('doc-drop-hover');
+  if (g && !g.contains(e.relatedTarget)) g.classList.remove('doc-drop-hover');
 });
 document.addEventListener('drop', async (e) => {
   if (document.body.dataset.view !== 'taxonomy') return;
   const g = e.target.closest && e.target.closest('g.tax-node');
-  if (!g) return;
-  const docId = e.dataTransfer.getData('text/x-tax-doc');
+  if (!g) {
+    if (window.__hragDraggedDocId) console.log('[hrag-tax] drop outside any node, ignored');
+    return;
+  }
+  let docId = '';
+  try { docId = (e.dataTransfer && e.dataTransfer.getData('text/x-tax-doc')) || ''; } catch {}
+  if (!docId) docId = window.__hragDraggedDocId || '';
   if (!docId) return;
   e.preventDefault();
   g.classList.remove('doc-drop-hover');
-  const nodeId = g.__data__?.data?.id;
+  console.log('[hrag-tax] drop', { docId, nodeId: g.dataset.id });
+  // Prefer data-id attribute (always set); fall back to D3's __data__ binding.
+  const nodeId = g.dataset.id || g.__data__?.data?.id;
   if (!nodeId) return;
+  // Check if target is a leaf — the server rejects non-leaf targets.
+  const targetNode = taxState.nodeMap && taxState.nodeMap.get(nodeId);
+  if (targetNode && !targetNode.data.is_leaf) {
+    flashToast('Drop onto a leaf node (the deepest level). This node has children.');
+    return;
+  }
+  // Skip the API roundtrip when dropping on the same leaf the doc already lives in.
+  if (String(nodeId) === String(_popoverNodeId)) {
+    flashToast('Already filed under this leaf.');
+    return;
+  }
   try {
     const r = await fetch('/api/taxonomy/move-doc', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ doc_id: docId, node_id: nodeId }),
     });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    flashToast('moved doc');
-    // refresh popover docs if open
+    if (!r.ok) {
+      let msg = 'HTTP ' + r.status;
+      try { const body = await r.json(); msg = body.detail || msg; } catch {}
+      throw new Error(msg);
+    }
+    const targetLabel = (targetNode && targetNode.data.label) || 'target leaf';
+    flashToast('Moved to “' + targetLabel + '”');
     if (_popoverNodeId) {
       try {
         const dr = await fetch(`/api/taxonomy/nodes/${encodeURIComponent(_popoverNodeId)}/docs`);

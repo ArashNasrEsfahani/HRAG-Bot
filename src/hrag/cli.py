@@ -201,7 +201,12 @@ def cmd_rebuild_kg(user: Optional[str]) -> None:
         from hrag.kg.builder import TripleExtractor  # noqa: PLC0415
 
         console.print("Wiping existing KG and community summaries...")
-        extractor = TripleExtractor(orch.llm, max_workers=cfg.kg.parallel_workers, db=orch.db)
+        extractor = TripleExtractor(
+            orch.llm,
+            max_workers=cfg.kg.parallel_workers,
+            db=orch.db,
+            dedup_enabled=getattr(cfg.kg, "dedup_enabled", True),
+        )
         for doc_id, chunks in chunks_by_doc.items():
             console.print(f"  Extracting triples for {doc_id} ({len(chunks)} chunks)...")
             triples = extractor.extract_batch(chunks)

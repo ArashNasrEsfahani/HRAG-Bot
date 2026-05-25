@@ -41,3 +41,34 @@ def strip_uncertain(answer: str) -> str:
     if not answer:
         return answer
     return _UNCERTAIN_RE.sub("", answer).rstrip()
+
+
+def extract_uncertain_spans(answer: str, *, max_chars_per_span: int = 240) -> list[str]:
+    """Return text fragments preceding each ``[UNCERTAIN]`` marker.
+
+    Used by the Phase 9.17 Self-RAG pass: for every flagged sub-claim, we
+    take the chunk of natural-language text the LLM wrote immediately before
+    the marker as the query for an extra retrieval pass. Looks back to the
+    previous sentence boundary (``.``/``!``/``?``/newline) or
+    ``max_chars_per_span`` characters, whichever comes first.
+
+    Empty / span-less inputs return ``[]`` with no allocation.
+    """
+    if not answer or "[UNCERTAIN]" not in answer:
+        return []
+    spans: list[str] = []
+    for m in _UNCERTAIN_RE.finditer(answer):
+        start = m.start()
+        # Walk back to the nearest sentence boundary or N chars, whichever first.
+        lookback_start = max(0, start - max_chars_per_span)
+        snippet = answer[lookback_start:start]
+        # Trim to last sentence ending; if none, keep the full snippet.
+        for boundary in (". ", "! ", "? ", "\n"):
+            idx = snippet.rfind(boundary)
+            if idx != -1:
+                snippet = snippet[idx + len(boundary):]
+                break
+        snippet = snippet.strip()
+        if snippet:
+            spans.append(snippet)
+    return spans

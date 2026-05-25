@@ -9,18 +9,49 @@ internally; OpenAI/Anthropic get true concurrency.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
 if TYPE_CHECKING:
     from hrag.db.connection import Database
     from hrag.providers.llm import LLMProvider
     from hrag.types import Chunk
+
+
+# ---------------------------------------------------------------------------
+# Canonicalisation (Phase 9.12)
+# ---------------------------------------------------------------------------
+
+
+def _canon_field(text: str) -> str:
+    """Canonical surface form for a single triple field.
+
+    Mirrors :func:`hrag.kg.store._canon` (lowercase + strip): the same canonical
+    form that the graph store's synonym-merging step uses. Keeping the two in
+    lockstep means a triple deduped here will also collapse onto the same
+    phrase node downstream. Heavier normalisations (embedding-based synonym
+    merge) still happen in :class:`KGStore`; this function is the cheap
+    deterministic floor.
+    """
+    return text.strip().lower()
+
+
+def canonical_triple_key(subject: str, relation: str, obj: str) -> str:
+    """Stable SHA-256 key over the canonical (subject, relation, object).
+
+    The pipe separator is reserved: it never appears inside a canonicalised
+    field (we strip leading/trailing whitespace; pipes inside a phrase are
+    unusual but would not collide because the order is fixed and each field
+    has been pre-canonicalised).
+    """
+    payload = f"{_canon_field(subject)}|{_canon_field(relation)}|{_canon_field(obj)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +233,29 @@ class TripleExtractor:
         llm: LLMProvider,
         max_workers: int = 8,
         db: Database | None = None,           # NEW: cache backend
+        dedup_enabled: bool = True,           # Phase 9.12: cross-chunk dedup
+        progress_cb: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
         self._llm = llm
         self._max_workers = max_workers
         self._prompt_template = _load_prompt_template()
         self._db = db
+        self._dedup_enabled = bool(dedup_enabled)
+        self._progress_cb = progress_cb
         self._model_name: str = (
             getattr(llm, "model_name", None)
             or getattr(getattr(llm, "config", None), "model", None)
             or "unknown"
         )
+
+    def _emit(self, event: str, payload: dict) -> None:
+        """Safe progress emit — never lets a callback bug break extraction."""
+        if self._progress_cb is None:
+            return
+        try:
+            self._progress_cb(event, payload)
+        except Exception:  # noqa: BLE001 — progress is best-effort
+            pass
 
     # ------------------------------------------------------------------
     # Cache helpers
@@ -281,6 +325,66 @@ class TripleExtractor:
             pass  # cache write failure must not break extraction
 
     # ------------------------------------------------------------------
+    # Cross-chunk dedup (Phase 9.12)
+    # ------------------------------------------------------------------
+
+    def _record_canonical_triples(
+        self, triples: list[Triple]
+    ) -> tuple[int, int]:
+        """Insert each canonical triple into ``kg_canonical_triples`` once.
+
+        Returns ``(n_new, n_seen)``: how many canonical keys were inserted
+        for the first time vs how many already existed. Concurrent inserts
+        on the same key are safe — SQLite serialises writes at the file
+        level and the ``ON CONFLICT(canonical_key) DO UPDATE`` atomically
+        increments ``freq``.
+
+        Disabled when ``dedup_enabled=False`` or no ``db`` is wired up.
+        Cache-table-missing (legacy DB) is tolerated silently — extraction
+        must keep working without the dedup index.
+        """
+        if not self._dedup_enabled or self._db is None or not triples:
+            return (0, 0)
+        n_new = 0
+        n_seen = 0
+        for t in triples:
+            key = canonical_triple_key(t.head, t.relation, t.tail)
+            try:
+                with self._db.conn:
+                    cur = self._db.execute(
+                        "INSERT INTO kg_canonical_triples"
+                        "(canonical_key, subject, relation, object,"
+                        " first_seen_chunk_id, freq)"
+                        " VALUES (?, ?, ?, ?, ?, 1)"
+                        " ON CONFLICT(canonical_key) DO UPDATE"
+                        " SET freq = freq + 1",
+                        (
+                            key,
+                            _canon_field(t.head),
+                            _canon_field(t.relation),
+                            _canon_field(t.tail),
+                            t.source_chunk_id,
+                        ),
+                    )
+                # rowcount == 1 on both INSERT and UPSERT in SQLite, so we
+                # disambiguate via a follow-up SELECT on freq.
+                row = self._db.execute(
+                    "SELECT freq FROM kg_canonical_triples WHERE canonical_key=?",
+                    (key,),
+                ).fetchone()
+                freq = row["freq"] if row is not None and hasattr(row, "keys") else (row[0] if row else 1)
+                if freq == 1:
+                    n_new += 1
+                else:
+                    n_seen += 1
+                _ = cur  # keep symmetry with _cache_put pattern
+            except Exception:
+                # Table missing or transient DB error — silent fallback.
+                # Counts stay zero for this triple; caller treats as no-op.
+                continue
+        return (n_new, n_seen)
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -302,7 +406,7 @@ class TripleExtractor:
         if cached is not None:
             # Re-stamp source_chunk_id in case the cached entry came from a
             # different chunk that happened to share text (rare but possible).
-            return [
+            restamped = [
                 Triple(
                     head=t.head,
                     relation=t.relation,
@@ -311,6 +415,26 @@ class TripleExtractor:
                 )
                 for t in cached
             ]
+            # Cross-chunk dedup bookkeeping still runs so freq counters track
+            # every chunk that contains this triple, even when the LLM call
+            # was short-circuited by an identical chunk text.
+            n_new, n_seen = self._record_canonical_triples(restamped)
+            self._emit(
+                "kg_dedup_hit",
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "hashed_skipped_llm": True,
+                    "triples_reused": len(restamped),
+                    "canonical_new": n_new,
+                    "canonical_seen": n_seen,
+                },
+            )
+            print(
+                f"[kg] chunk {chunk.chunk_id}: dedup hit, "
+                f"skipped LLM ({len(restamped)} triples reused)",
+                flush=True,
+            )
+            return restamped
 
         prompt = _render_prompt(self._prompt_template, chunk.text)
         raw = self._llm.complete(prompt, temperature=0.0)
@@ -356,6 +480,22 @@ class TripleExtractor:
         # Cache successful result (including known-empty []) so we don't re-call
         # the LLM for chunks that genuinely yield no triples.
         self._cache_put(key, triples)
+        # Cross-chunk dedup: count newly-seen vs already-seen triples and
+        # emit a progress event when any sighting was a duplicate. The
+        # passage edge for *this* chunk is still added downstream by
+        # KGStore.upsert_triples so mirror correctness is preserved.
+        n_new, n_seen = self._record_canonical_triples(triples)
+        if n_seen > 0:
+            self._emit(
+                "kg_dedup_hit",
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "hashed_skipped_llm": False,
+                    "triples_reused": n_seen,
+                    "canonical_new": n_new,
+                    "canonical_seen": n_seen,
+                },
+            )
         return triples
 
     def extract_batch(self, chunks: Sequence[Chunk]) -> list[Triple]:

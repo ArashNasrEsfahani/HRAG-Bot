@@ -147,6 +147,7 @@ _GREETING_INTERROGATIVES: frozenset[str] = frozenset(
     {"what", "what's", "whats", "is", "are", "how", "how's", "hows", "it", "going"}
 )
 
+
 # Boot self-test golden set — exercises every fast-path branch with realistic
 # queries. Verified on every Orchestrator boot; mismatches → one logger.warning
 # line so silent fast-path regressions show up in the streamlit log.

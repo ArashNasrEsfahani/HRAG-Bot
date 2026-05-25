@@ -232,3 +232,19 @@ CREATE TABLE IF NOT EXISTS feedback (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_message_unique ON feedback(message_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_user_rating ON feedback(user_id, rating);
+
+-- Phase 9.9 — Rerank-fallback telemetry. One row per turn where the
+-- cross-encoder zero-filter tripped and the orchestrator fell back to the
+-- unreranked top-k. Surfaces in `hrag feedback-stats` so users can see which
+-- queries the reranker mis-scores.
+CREATE TABLE IF NOT EXISTS rerank_fallback_events (
+    event_id          TEXT PRIMARY KEY,
+    turn_id           TEXT NOT NULL,
+    session_id        TEXT,
+    user_id           TEXT,
+    query             TEXT NOT NULL,
+    dropped_chunk_ids TEXT,                              -- JSON list of chunk_ids
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_rerank_fallback_session
+    ON rerank_fallback_events(session_id);

@@ -36,6 +36,7 @@ def _make_stub(name: str) -> types.ModuleType:
     mod = types.ModuleType(name)
     mod.__package__ = name
     mod.__path__ = []          # mark as a package so sub-imports work
+    mod.__hrag_stub__ = True   # let tests detect a stubbed module and skip
     sys.modules[name] = mod
     return mod
 

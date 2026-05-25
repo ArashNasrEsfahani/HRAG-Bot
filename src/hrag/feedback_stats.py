@@ -77,10 +77,21 @@ def feedback_summary(db) -> dict:
             }
         )
 
+    # Phase 9.9 — rerank-fallback telemetry, defensively in case the table
+    # does not exist yet (older DBs that pre-date the migration).
+    try:
+        fb_row = db.execute(
+            "SELECT COUNT(*) AS n FROM rerank_fallback_events"
+        ).fetchone()
+        rerank_fallback_count = fb_row["n"] if fb_row else 0
+    except Exception:  # noqa: BLE001
+        rerank_fallback_count = 0
+
     return {
         "thumbs_up": thumbs_up,
         "thumbs_down": thumbs_down,
         "total": thumbs_up + thumbs_down,
         "sessions": sessions,
         "top_negative": top_negative,
+        "rerank_fallback_count": rerank_fallback_count,
     }

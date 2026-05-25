@@ -35,6 +35,11 @@ class LLMConfig(BaseModel):
     max_tokens: int = 1024
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    # Per-provider keys — stored separately so all providers can be
+    # pre-configured at once. Each provider falls back to api_key, then its
+    # env var (OPENROUTER_API_KEY / GEMINI_API_KEY).
+    openrouter_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
     # Ollama-only: context window size sent as `num_ctx`. Ollama otherwise defaults
     # to the model's max (e.g. 131k for gemma4), allocating a huge KV cache that
     # forces CPU spill on small GPUs. 8192 covers hrag's realistic prompts.
@@ -59,6 +64,30 @@ class LLMConfig(BaseModel):
     # token count of your system prompt + a small slack to reuse it across
     # turns in the same session.
     num_keep: Optional[int] = None
+    # Phase 9.5 — Anthropic-only. When True, the AnthropicProvider wraps the
+    # system prompt and the last user message in cache_control={"type":
+    # "ephemeral"} blocks so Anthropic's prompt cache can reuse them across
+    # turns. Cached writes cost 1.25x, cached reads cost 0.1x — a multi-turn
+    # FACTUAL session with a stable system + retrieval prefix saves 30–80% on
+    # cost and latency. Default OFF: existing tests + callers see a string
+    # `system=` and string `content=` (byte-identical to today). No effect on
+    # Ollama or OpenAI paths.
+    anthropic_prompt_caching: bool = False
+    # Phase 9.4 — Ollama warm-up ping. When True (the default), the
+    # Orchestrator fires a 1-token chat() during __init__ to pre-load the
+    # model into VRAM. This eliminates the 2–4 s cold-load tax on the user's
+    # first turn. The flag is a no-op for OpenAI/Anthropic (no concept of a
+    # resident model). Default ON because it is a pure speed win on Ollama and
+    # costs nothing when the model is already loaded.
+    warmup_on_init: bool = True
+    # Phase 9.4 — auto-compute num_keep from the answer-prompt prefix. When
+    # True AND num_keep has NOT been explicitly set, the Orchestrator reads
+    # prompts/answer.md, takes the prefix before {user_profile}, estimates its
+    # token count at ~4 chars/token, and stores the result in cfg.llm.num_keep
+    # so it persists through the session. Default OFF — opt in when you want
+    # the KV-cache prefix to survive across turns without guessing the right
+    # num_keep by hand.
+    num_keep_auto: bool = False
 
 
 class EmbeddingsConfig(BaseModel):
@@ -81,6 +110,26 @@ class EmbeddingsConfig(BaseModel):
         {"label": "bge-small-en-v1.5 (fast, 384-d)",
          "model": "BAAI/bge-small-en-v1.5", "dim": 384},
     ])
+
+    # Phase 9.3 — per-session query embedding LRU cache. Eliminates redundant
+    # embed_one() calls when the same query repeats across Phase-8 review
+    # actions (rephrase, redescend, filter). Cache key is (session_id, query)
+    # — calls that omit session_id always bypass the cache.
+    query_cache_enabled: bool = True
+    query_cache_size: int = 64
+
+    # Phase 9.7 — precision / backend selector for SentenceTransformersProvider.
+    # "fp32" (default): full float32, same as today, no behavioural change.
+    # "fp16":           half-precision on GPU. ~50% VRAM cut, ~1.5–2x throughput.
+    #                   Auto-falls back to fp32 when CUDA is unavailable.
+    # "onnx_int8":      quantized ONNX export via optimum/onnxruntime. Best
+    #                   throughput on CPU (>2x), zero GPU dep. Requires the
+    #                   `quantize` optional dep group (same as the Phase-9.8
+    #                   reranker — installs `optimum[onnxruntime]` + `onnxruntime`).
+    embed_precision: str = "fp32"
+    # Device hint for SentenceTransformersProvider. None = let the library pick
+    # (CUDA if available, else CPU). Set to "cuda", "cuda:0", "cpu", or "mps".
+    embed_device: Optional[str] = None
 
 
 class StorageConfig(BaseModel):
@@ -124,6 +173,17 @@ class KGConfig(BaseModel):
                                            # passage score by (1 - beta * depth)
                                            # when chunk.section_depth is available.
 
+    # Phase 9.12 — cross-chunk triple deduplication.
+    # When True (default), the extractor consults kg_canonical_triples after
+    # each LLM call. Each unique (subject, relation, object) triple is
+    # inserted once and gets a freq counter incremented on every subsequent
+    # sighting. The per-chunk passage edge is still created in the graph
+    # (mirror correctness). The per-chunk hash short-circuit in
+    # kg_triple_cache is independent and always on when ``db`` is provided
+    # to the extractor. Disable for debugging or to force re-extraction of
+    # every triple.
+    dedup_enabled: bool = True
+
 
 class RetrievalConfig(BaseModel):
     top_k_vector: int = 10
@@ -146,6 +206,10 @@ class RetrievalConfig(BaseModel):
     # Reranker choice: "cross_encoder" | "llm" | "batched_llm"
     reranker: str = "cross_encoder"
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # Phase 9.8 — opt-in INT8 ONNX export of the cross-encoder. Requires the
+    # `quantize` optional dep group (`pip install -e .[quantize]`). Silent
+    # fallback to FP32 when optimum/onnxruntime is missing.
+    rerank_quantize: bool = False
 
     # Threshold semantics depend on the reranker:
     #   cross_encoder -> float logit (default -5 = permissive; only filter clearly bad)
@@ -231,6 +295,70 @@ class RetrievalConfig(BaseModel):
         }
     )
 
+    # Phase 9.15 — Feedback-weighted re-ranking.
+    # When True, historical 👍/👎 feedback is used to nudge reranker scores.
+    # Each chunk's EMA(thumbs_up - thumbs_down) score is computed from the
+    # feedback table (joined to messages.metadata.sources) and added to the
+    # cross-encoder logit as: final_score = rerank_score + weight * feedback_score.
+    # Default OFF — users with no feedback history should see no change.
+    feedback_reranking_enabled: bool = False
+    # Weight of the feedback nudge (default 0.3 — keeps feedback as a hint,
+    # not a steamroller). Tune upward once a substantial feedback corpus exists.
+    feedback_reranking_weight: float = 0.3
+    # EMA decay rate for the feedback scorer (alpha in [0,1]).
+    # Higher alpha = more weight on recent feedback; lower = smoother history.
+    feedback_reranking_alpha: float = 0.3
+
+    # Phase 9.2 — Async pre-retrieval stages.
+    # When True AND ``compaction.combined_preflight_enabled`` is False, gate /
+    # clue / intent-classifier calls are dispatched concurrently via a small
+    # ThreadPoolExecutor. Mutually exclusive with the combined-preflight path
+    # (combined wins when both are on). Default OFF — safest behaviour matches
+    # pre-Phase-9 serial dispatch. Set to True once you have observed that the
+    # 3 calls are independent on your LLM provider (Anthropic / OpenAI / a
+    # second Ollama instance behind a load-balancer).
+    async_preflight_enabled: bool = False
+
+    # Phase 9.9 — Rerank-fallback telemetry.
+    # When True, the orchestrator logs a row to the ``feedback`` table every
+    # time the cross-encoder zero-filter trips and the unreranked top-k is
+    # used as a fallback. Surfaces in ``hrag feedback-stats`` so users can see
+    # which queries the reranker mis-scores. Default OFF — the fallback itself
+    # is unchanged either way; this only flips the logging.
+    rerank_fallback_telemetry_enabled: bool = False
+
+    # Phase 9.10 — First-token latency tracker.
+    # When True, the orchestrator records the wall-clock time between
+    # ``generate_start`` and the first streamed token, emits it on the
+    # ``generate`` event as ``first_token_ms``, and persists it into
+    # ``messages.metadata`` under ``{"latency": {"first_token_ms": ...}}``.
+    # Default OFF — the ``generate`` event payload otherwise stays
+    # byte-identical to pre-Phase-9.10.
+    first_token_latency_enabled: bool = False
+
+    # Phase 9.16 — CRAG-style automatic re-routing.
+    # When True AND the post-rerank top score is below ``crag_score_floor``
+    # AND no Phase-8 review pause already redirected the turn, the
+    # orchestrator runs one query rewrite + retry retrieval pass before
+    # falling through to the FACTUAL→GENERAL swap. Lighter cousin of the
+    # Phase-8 user-mediated review. Cap of 1 retry to bound latency.
+    crag_enabled: bool = False
+    crag_score_floor: float = 0.0
+    crag_retry_top_k_multiplier: float = 2.0
+
+    # Phase 9.11 — QueryRouter speculative short-circuit.
+    # When True (default ON — this is a pure speed win with no semantic change),
+    # the QueryRouter skips the multi-retriever RRF fusion for clearly-routed
+    # ``entity`` or ``global`` queries. Instead of fanning out to kg_ppr +
+    # bm25 + vector (entity) or community + vector (global), it calls ONLY the
+    # primary retriever for that route:
+    #   entity  -> kg_ppr (falls back to bm25, then vector if kg_ppr is absent)
+    #   global  -> community (falls back to vector if community is absent)
+    # For ``cross_document`` and ``ambiguous``, the full RRF fusion is always
+    # kept — those routes exist precisely to hedge across multiple sources.
+    # Set to False to restore the pre-Phase-9.11 broad-fanout behaviour.
+    router_short_circuit: bool = True
+
 
 class ChunkingConfig(BaseModel):
     max_tokens: int = 400
@@ -257,6 +385,43 @@ class IngestConfig(BaseModel):
                                                 # PyMuPDF as today.
     nougat_model: str = "facebook/nougat-base"  # checkpoint id; "facebook/nougat-small"
                                                 # is a faster lower-fidelity option.
+
+    # Phase 9.14 — Contextual Retrieval (Anthropic technique).
+    # When True, run one LLM call per chunk at ingest to generate a
+    # 50-100-token "context line" describing the chunk's role in its parent
+    # document. The line is PREPENDED to ``chunk.embedding_text`` (HeteRAG
+    # fusion target - what the embedder sees). ``chunk.text`` (what the LLM
+    # sees at answer time) is left untouched. Per-chunk results cached in
+    # ``ingest_context_cache`` keyed by (chunk_text, doc_hash, model_name)
+    # so re-ingesting an unchanged doc is free.
+    #
+    # Off by default because it adds 1 LLM call per chunk x every doc at
+    # ingest, and turning it on requires a re-ingest of existing documents
+    # to take effect.
+    #
+    # Anthropic reports ~35% reduction in retrieval failures (~67% when
+    # combined with BM25 + reranking).
+    contextual_retrieval_enabled: bool = False
+    contextual_retrieval_max_workers: int = 4          # ThreadPoolExecutor size
+                                                        # (Ollama serialises;
+                                                        # OpenAI/Anthropic get
+                                                        # true parallelism).
+    contextual_retrieval_max_doc_chars: int = 60_000   # cap on full document
+                                                        # text fed into the
+                                                        # prompt. ~15k tokens;
+                                                        # fits gemma3's 8k
+                                                        # num_ctx after the
+                                                        # chunk itself. If the
+                                                        # doc is much larger we
+                                                        # truncate with a [...]
+                                                        # marker. Less context
+                                                        # in -> less informative
+                                                        # augmentation.
+    contextual_retrieval_max_context_tokens: int = 100  # max_tokens cap for
+                                                         # the LLM call.
+                                                         # Anthropic's technique
+                                                         # targets 50-100 tokens;
+                                                         # budget some slack.
 
 
 class ContextConfig(BaseModel):
@@ -299,7 +464,7 @@ class IntentConfig(BaseModel):
     enabled: bool = True                       # master switch for the intent layer
     fast_path_only: bool = False               # skip the LLM fallback (regex-only)
     llm_max_tokens: int = 30                   # cap on the LLM classifier's output
-    personal_top_k: int = 3                    # episodic memories pulled on PERSONAL
+    personal_top_k: int = 8                    # chunks pulled on PERSONAL (documents + episodic)
     corpus_relevance_floor: float = 0.15       # max retrieval score below which a
                                                 # FACTUAL query is rewritten to GENERAL.
                                                 # Cosine-space (0..1) since r.score
@@ -381,6 +546,35 @@ class CompactionConfig(BaseModel):
 
     # [UNCERTAIN] masking: render `[UNCERTAIN]` tokens visibly in answers.
     mask_uncertain: bool = False
+
+    # Phase 9.6 — combined gate+clue+intent in one LLM call.
+    # When True AND all three of gate_enabled / clue_enabled / intent.enabled are
+    # also True, the orchestrator renders prompts/combined_preflight.md and
+    # parses {intent, gate_decision, clue} from one JSON response. Saves 2 round
+    # trips on each FACTUAL turn. The per-stage progress events still fire (with
+    # source="combined") so the GUI / benchmark stay compatible.
+    # Default OFF — opt in once you have observed that the 3 calls are the
+    # critical path on your hardware.
+    combined_preflight_enabled: bool = False
+    combined_preflight_max_tokens: int = 280
+
+    # Phase 9.13 — context compression for over-budget prompts.
+    # When the rendered prompt exceeds ``context_budget_chars`` characters,
+    # summarize the oldest half of conversation history via the existing
+    # DialogMSTCompactor and drop the lowest-scoring quartile of retrieved
+    # passages. Default OFF — long prompts work as-is; this is a recovery path
+    # for genuinely over-budget turns on small num_ctx Ollama models.
+    context_compression_enabled: bool = False
+    context_budget_chars: int = 12_000
+
+    # Phase 9.17 — Self-RAG span re-retrieval.
+    # When True AND the answer contains [UNCERTAIN] markers, run one extra
+    # retrieval pass per uncertain span (cap at ``self_rag_max_spans``) and
+    # append the retrieved snippets as a "Sources for uncertain claims"
+    # block below the answer. Off by default; the [UNCERTAIN] tokens are
+    # already rendered / stripped by mask_uncertain in either case.
+    self_rag_enabled: bool = False
+    self_rag_max_spans: int = 2
 
 
 class FormulaExtractionConfig(BaseModel):

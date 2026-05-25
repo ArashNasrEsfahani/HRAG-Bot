@@ -206,11 +206,46 @@
       <div class="drawer-body">
         <section class="drawer-section">
           <h3>Model</h3>
-          <div class="kv"><span>Provider</span><span id="cfg-provider">—</span></div>
+          <label class="field">
+            <span>Provider</span>
+            <select id="cfg-provider-select">
+              <option value="ollama">ollama</option>
+              <option value="openai">openai</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openrouter">openrouter</option>
+              <option value="gemini">gemini</option>
+            </select>
+          </label>
           <label class="field">
             <span>Model</span>
             <select id="cfg-model"><option>—</option></select>
           </label>
+          <div id="openrouter-row" style="display:none">
+            <label class="field">
+              <span>OpenRouter API key</span>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="password" id="cfg-openrouter-key"
+                  placeholder="sk-or-v1-…" autocomplete="off"
+                  style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface1);color:inherit;font-size:0.82rem" />
+                <button id="cfg-openrouter-key-save"
+                  style="padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);cursor:pointer;font-size:0.8rem">Save</button>
+              </div>
+            </label>
+            <div class="hint">Key is stored in memory only (not written to disk). Re-enter after a server restart.</div>
+          </div>
+          <div id="gemini-row" style="display:none">
+            <label class="field">
+              <span>Gemini API key</span>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="password" id="cfg-gemini-key"
+                  placeholder="AIzaSy…" autocomplete="off"
+                  style="flex:1;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface1);color:inherit;font-size:0.82rem" />
+                <button id="cfg-gemini-key-save"
+                  style="padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);cursor:pointer;font-size:0.8rem">Save</button>
+              </div>
+            </label>
+            <div class="hint">Key is stored in memory only (not written to disk). Re-enter after a server restart.</div>
+          </div>
           <label class="toggle">
             <span>Think mode</span>
             <input type="checkbox" id="cfg-think" />
@@ -473,6 +508,26 @@
             <span class="upload-taxonomy-label">Place new docs in the taxonomy:</span>
             <label><input type="radio" name="taxmode" value="auto" checked> Auto</label>
             <label><input type="radio" name="taxmode" value="manual"> Manually (I'll drag them onto a node)</label>
+          </div>
+          <!-- Ingestion method options. PDF parser + contextual augmentation.
+               Nougat radio is enabled/disabled by app.js after it checks
+               GET /api/ingest/nougat_status on init. -->
+          <div class="upload-method-options" id="upload-method-options">
+            <div class="upload-method-row">
+              <span class="upload-method-label">PDF parser:</span>
+              <label><input type="radio" name="pdfparser" value="pymupdf" checked> PyMuPDF</label>
+              <label id="nougat-parser-label" title="Nougat OCR — not installed">
+                <input type="radio" name="pdfparser" value="nougat" disabled> Nougat
+                <span class="nougat-badge" id="nougat-badge">not installed</span>
+              </label>
+            </div>
+            <div class="upload-method-row">
+              <span class="upload-method-label">Contextual augmentation:</span>
+              <label title="Prepends a context line to each chunk's embedding (requires LLM call per chunk)">
+                <input type="checkbox" id="upload-contextual">
+                <span id="upload-contextual-hint">prepend context line to embeddings</span>
+              </label>
+            </div>
           </div>
           <div id="upload-progress" class="upload-progress"></div>
         </div>

@@ -578,6 +578,12 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   0%, 100% { transform: scale(1); opacity: 1; }
   50%      { transform: scale(1.5); opacity: 0.5; }
 }
+/* Opacity-only variant used for upload-row dots — no scale so the dot
+   never expands into surrounding text and causes vertical jumping. */
+@keyframes upload-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
 
 /* ----- reasoning trace ------------------------------------ */
 .trace {
@@ -1117,6 +1123,8 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   border-radius: 8px;
   background: rgba(255,255,255,0.025);
   font-size: 0.82rem;
+  /* Reserve the border-left width on all states so done/failed don't shift content */
+  border-left: 2px solid transparent;
 }
 [data-theme="light"] .upload-row { background: rgba(0,0,0,0.03); }
 .upload-row .ur-name {
@@ -1129,18 +1137,24 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   font-family: var(--mono);
   font-size: 0.74rem;
   white-space: nowrap;
+  /* Reserve space so varying-length poll messages don't shift the filename */
+  min-width: 10ch;
+  text-align: right;
 }
 .upload-row.pending .ur-status::before {
   content: ''; display: inline-block;
   width: 8px; height: 8px; margin-right: 6px;
   background: var(--accent);
   border-radius: 50%;
-  animation: pulse 1.2s infinite ease-in-out;
+  /* opacity-only pulse — no scale so the dot never pushes row height */
+  animation: upload-dot-pulse 1.2s infinite ease-in-out;
   vertical-align: middle;
+  /* prevent the dot from affecting the line-height of surrounding text */
+  position: relative; top: -1px;
 }
-.upload-row.done { border-left: 2px solid var(--good); }
+.upload-row.done { border-left-color: var(--good); }
 .upload-row.done .ur-status { color: var(--good); }
-.upload-row.failed { border-left: 2px solid var(--bad); }
+.upload-row.failed { border-left-color: var(--bad); }
 .upload-row.failed .ur-status { color: var(--bad); }
 
 .drawer-empty {
@@ -1953,8 +1967,21 @@ body[data-view="taxonomy"] .app > .main {
 [data-theme="light"] .tax-node.drag-hover .tax-card { fill: rgba(138,111,59,0.10); }
 .tax-node.doc-drop-hover .tax-card {
   stroke: var(--accent);
-  stroke-width: 2.4;
-  fill: rgba(232,220,196,0.12);
+  stroke-width: 3.2;
+  fill: rgba(232,220,196,0.22);
+  filter: drop-shadow(0 0 8px var(--accent));
+}
+/* Soft pulse on every valid leaf drop target while a chip drag is active */
+.tax-node.drop-target-hint .tax-card {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+  fill: rgba(232,220,196,0.10);
+  animation: drop-hint-pulse 1.1s ease-in-out infinite;
+}
+@keyframes drop-hint-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
 }
 .tax-drag-ghost {
   position: absolute;
@@ -2003,7 +2030,19 @@ body[data-view="taxonomy"] .app > .main {
    Force display:none on [hidden] so toggling ``taxLoading.hidden = true``
    from JS actually hides the spinner. Without this rule the loader stays
    visible over the empty state and the page looks frozen. */
-.tax-empty[hidden], .tax-loading[hidden], .tax-svg[hidden],
+.tax-empty[hidden], .tax-loading[hidden], .tax-svg[hidden] {
+  display: none !important;
+}
+/* Popover is fully hidden (but still mounted) during a chip drag so tree
+   nodes behind it are both visible AND reachable. `visibility: hidden` keeps
+   the drag source attached (some browsers cancel drag if the source is
+   detached) while completely freeing the screen. */
+.tax-popover.drag-ghost {
+  pointer-events: none !important;
+  visibility: hidden;
+  opacity: 0;
+}
+
 .tax-modal[hidden], .tax-modal-scrim[hidden], .tax-popover[hidden],
 .tax-modal-summary[hidden], .tax-modal-error[hidden] {
   display: none !important;
@@ -2173,9 +2212,23 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
   transition: background var(--t-base), border-color var(--t-base);
 }
 .tax-doc-chip:hover { background: rgba(255,255,255,0.05); border-color: var(--line-2); }
+.tax-doc-chip:hover .tax-doc-chip-grip { color: var(--accent); }
 .tax-doc-chip:active { cursor: grabbing; }
 .tax-doc-chip.dragging { opacity: 0.5; }
 .tax-doc-chip svg { color: var(--muted); flex-shrink: 0; }
+.tax-doc-chip-grip {
+  display: inline-block;
+  color: var(--muted-2);
+  font-size: 0.85rem;
+  line-height: 1;
+  letter-spacing: -2px;
+  user-select: none;
+  cursor: grab;
+  padding: 0 2px;
+  transition: color var(--t-base);
+}
+.tax-doc-chip.is-episodic { cursor: default; }
+.tax-doc-chip.is-episodic .tax-doc-chip-grip { display: none; }
 
 /* ----- recompute modal ----- */
 .tax-modal-scrim {
@@ -2332,10 +2385,14 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
 /* ===== Popover doc-chip (rich) ===== */
 .tax-doc-chip {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: center;
   gap: 8px;
   padding: 5px 8px;
+}
+/* Episodic chips have no grip → collapse to the original 3-column grid */
+.tax-doc-chip.is-episodic {
+  grid-template-columns: auto 1fr auto;
 }
 .tax-doc-chip.is-episodic { border-color: rgba(170,160,210,0.30); background: rgba(170,160,210,0.05); }
 .tax-doc-chip-icon {
@@ -2378,6 +2435,65 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
   color: var(--bad, #d9a0a0);
   border-color: rgba(217,160,160,0.35);
 }
+
+/* Native <select> wrapper shown when the user clicks a chip's Move button.
+   Sits as a SIBLING of the chip inside .tax-pop-docs (which scrolls), so the
+   wrapper spans the full row width and the native dropdown is positioned by
+   the browser's own popup layer (immune to overflow clipping). */
+.chip-move-select-wrap {
+  grid-column: 1 / -1;
+  margin: 2px 0 4px;
+  display: flex;
+}
+.chip-move-select {
+  flex: 1;
+  padding: 5px 8px;
+  background: var(--bg-2);
+  color: var(--ink-bright);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 0.80rem;
+  font-family: var(--font);
+  cursor: pointer;
+  outline: none;
+}
+.chip-move-select:focus { box-shadow: 0 0 0 2px rgba(232,220,196,0.20); }
+
+/* Inline leaf-node picker that appears below a doc chip's Move button */
+.chip-move-picker {
+  margin: 2px 0 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  background: var(--surface-2, var(--bg-2));
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+}
+.chip-move-picker-head {
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--line);
+}
+.chip-move-picker-opt {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  font-size: 0.80rem;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background var(--t-fast);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip-move-picker-opt:hover { background: rgba(255,255,255,0.07); color: var(--ink-bright); }
+[data-theme="light"] .chip-move-picker-opt:hover { background: rgba(0,0,0,0.05); }
 
 /* Inline preview drawer inside the popover doc list */
 /* ----- Right-side doc/memory preview panel ------------------------- */
@@ -3215,6 +3331,52 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
 .upload-taxonomy-choice input[type="radio"] {
   margin: 0; accent-color: var(--accent);
 }
+
+/* ===== Upload-zone ingestion method options (PDF parser + contextual) === */
+.upload-method-options {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+[data-theme="light"] .upload-method-options { background: rgba(0,0,0,0.015); }
+.upload-method-row {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+}
+.upload-method-label {
+  color: var(--ink-bright); font-weight: 500; white-space: nowrap; flex-shrink: 0;
+}
+.upload-method-row label {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+}
+.upload-method-row label:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
+.upload-method-row input[type="radio"],
+.upload-method-row input[type="checkbox"] {
+  margin: 0; accent-color: var(--accent);
+}
+#upload-contextual-hint { color: var(--muted); }
+.nougat-badge {
+  font-size: 0.70rem; padding: 1px 6px; border-radius: 4px;
+  background: rgba(255,255,255,0.06); color: var(--muted);
+}
+.nougat-badge.installed { background: rgba(100,180,100,0.15); color: #7dc47d; }
+[data-theme="light"] .nougat-badge { background: rgba(0,0,0,0.06); }
+[data-theme="light"] .nougat-badge.installed { background: rgba(60,140,60,0.12); color: #2d7d2d; }
+
+/* ===== Doc-list delete button in the Documents drawer =================== */
+.doc-card-del {
+  background: none; border: none; cursor: pointer;
+  color: var(--muted-2);
+  padding: 3px 5px; border-radius: 4px;
+  opacity: 0;
+  transition: opacity var(--t-base), color var(--t-base);
+  margin-left: auto; flex-shrink: 0;
+}
+.doc-card:hover .doc-card-del { opacity: 1; }
+.doc-card-del:hover { color: var(--bad, #e05c5c); background: rgba(224,92,92,0.1); }
 
 /* ===== Manual-mode "unfiled" banner shown on the Taxonomy page after a
    background ingest completes with taxonomy_mode=manual ================ */

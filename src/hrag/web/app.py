@@ -119,6 +119,11 @@ class ConfigPatch(BaseModel):
     adaptive_retriever_per_intent: Optional[dict] = None
     use_nougat: Optional[bool] = None
     nougat_model: Optional[str] = None
+    # Provider switch — rebuilds orch.llm on the fly.
+    provider: Optional[str] = None
+    llm_api_key: Optional[str] = None          # shared key (openai / anthropic)
+    openrouter_api_key: Optional[str] = None   # stored permanently for OpenRouter
+    gemini_api_key: Optional[str] = None       # stored permanently for Gemini
 
 
 class UserSwitch(BaseModel):
@@ -212,6 +217,9 @@ def get_config() -> dict[str, Any]:
             "temperature": cfg.llm.temperature,
             "keep_alive": cfg.llm.keep_alive,
             "num_keep": cfg.llm.num_keep,
+            "api_key_set": bool(cfg.llm.api_key),
+            "openrouter_key_set": bool(cfg.llm.openrouter_api_key),
+            "gemini_key_set": bool(cfg.llm.gemini_api_key),
         },
         "embeddings": {
             "model": cfg.embeddings.model,
@@ -385,7 +393,41 @@ def patch_config(patch: ConfigPatch) -> dict[str, Any]:
     if patch.nougat_model is not None:
         cfg.ingest.nougat_model = patch.nougat_model
 
-    # Live rebuilds (imported lazily to avoid touching heavy deps on cold path).
+    # Provider / API-key live swap — rebuild orch.llm immediately.
+    needs_llm_rebuild = False
+    _allowed_providers = {"ollama", "openai", "anthropic", "openrouter", "gemini"}
+    if patch.provider is not None and patch.provider != cfg.llm.provider:
+        if patch.provider not in _allowed_providers:
+            raise HTTPException(
+                400,
+                f"Unknown provider {patch.provider!r}. Allowed: {sorted(_allowed_providers)}",
+            )
+        cfg.llm.provider = patch.provider
+        needs_llm_rebuild = True
+    if patch.llm_api_key is not None:
+        cfg.llm.api_key = patch.llm_api_key or None  # empty string → None
+        needs_llm_rebuild = True
+    if patch.openrouter_api_key is not None:
+        cfg.llm.openrouter_api_key = patch.openrouter_api_key or None
+        if cfg.llm.provider == "openrouter":
+            needs_llm_rebuild = True
+    if patch.gemini_api_key is not None:
+        cfg.llm.gemini_api_key = patch.gemini_api_key or None
+        if cfg.llm.provider == "gemini":
+            needs_llm_rebuild = True
+    if needs_llm_rebuild:
+        from hrag.providers.llm import get_llm_provider  # noqa: PLC0415
+        import logging as _llm_log  # noqa: PLC0415
+        try:
+            orch.llm = get_llm_provider(cfg.llm)
+        except RuntimeError as exc:
+            # Missing API key: config is updated so the UI shows the key row,
+            # but we don't raise — the user will supply the key momentarily.
+            _llm_log.getLogger("hrag.web").warning(
+                "LLM provider %r not rebuilt (no key yet): %s", cfg.llm.provider, exc
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, f"Could not build provider {cfg.llm.provider!r}: {exc}") from exc
     if needs_retriever_rebuild:
         from hrag.retrieval.factory import build_retriever  # noqa: PLC0415
         orch.retriever = build_retriever(
@@ -448,6 +490,50 @@ def list_llm_models() -> dict[str, Any]:
         return {"provider": "ollama", "models": out, "current": cur}
     except Exception as exc:  # noqa: BLE001
         return {"provider": "ollama", "models": [], "error": str(exc)}
+
+
+@app.get("/api/llm/openrouter/models")
+def list_openrouter_models() -> dict[str, Any]:
+    """Return free models available on OpenRouter."""
+    import os as _os  # noqa: PLC0415
+
+    cfg = _get_cfg()
+    api_key = cfg.llm.openrouter_api_key or cfg.llm.api_key or _os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            400,
+            "No OpenRouter API key found. Set llm.openrouter_api_key in config.yaml or "
+            "the OPENROUTER_API_KEY environment variable.",
+        )
+    try:
+        from hrag.providers.llm import fetch_openrouter_free_models  # noqa: PLC0415
+
+        models = fetch_openrouter_free_models(api_key)
+        return {"models": models, "current": cfg.llm.model}
+    except Exception as exc:  # noqa: BLE001
+        return {"models": [], "error": str(exc)}
+
+
+@app.get("/api/llm/gemini/models")
+def list_gemini_models() -> dict[str, Any]:
+    """Return Google Gemini text-chat models available for the configured key."""
+    import os as _os  # noqa: PLC0415
+
+    cfg = _get_cfg()
+    api_key = cfg.llm.gemini_api_key or cfg.llm.api_key or _os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            400,
+            "No Gemini API key found. Set llm.gemini_api_key in config.yaml or "
+            "the GEMINI_API_KEY environment variable.",
+        )
+    try:
+        from hrag.providers.llm import fetch_gemini_models  # noqa: PLC0415
+
+        models = fetch_gemini_models(api_key)
+        return {"models": models, "current": cfg.llm.model}
+    except Exception as exc:  # noqa: BLE001
+        return {"models": [], "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1378,6 +1464,8 @@ def _run_ingest_job(
     original_name: str,
     *,
     taxonomy_mode: str = "auto",
+    use_nougat: Optional[bool] = None,
+    contextual: Optional[bool] = None,
 ) -> None:
     """Worker thread: runs IngestPipeline.ingest_path and updates the job row.
 
@@ -1387,6 +1475,13 @@ def _run_ingest_job(
                        the user drags it onto a node OR POSTs
                        ``/api/taxonomy/auto-assign/{doc_id}``.
       * ``"skip"``   — alias of ``"manual"`` (no auto-assign).
+
+    ``use_nougat`` / ``contextual``:
+      Per-upload overrides for ``cfg.ingest.use_nougat`` and
+      ``cfg.ingest.contextual_retrieval_enabled``.  When ``None`` (default)
+      the global config value is used unchanged.  The original values are
+      restored after ``ingest_path`` returns so concurrent ingests do not
+      interfere with each other.
     """
     from hrag.ingest.pipeline import CancelledError as _CancelledError  # noqa: PLC0415
 
@@ -1465,12 +1560,26 @@ def _run_ingest_job(
                     file_entry["n_chunks"] = payload["n_chunks"]
             _flush_job_state(job_id, state)
 
-        doc = orch.ingest.ingest_path(
-            str(dest_path),
-            uid,
-            skip_taxonomy=skip_taxonomy,
-            progress_cb=progress_cb,
-        )
+        # Apply per-upload method overrides, restoring originals after the
+        # call so that concurrent ingests don't see each other's settings.
+        _ingest_cfg = orch.ingest.config.ingest
+        _orig_nougat = _ingest_cfg.use_nougat
+        _orig_ctx = _ingest_cfg.contextual_retrieval_enabled
+        if use_nougat is not None:
+            _ingest_cfg.use_nougat = use_nougat
+        if contextual is not None:
+            _ingest_cfg.contextual_retrieval_enabled = contextual
+        try:
+            doc = orch.ingest.ingest_path(
+                str(dest_path),
+                uid,
+                skip_taxonomy=skip_taxonomy,
+                progress_cb=progress_cb,
+            )
+        finally:
+            _ingest_cfg.use_nougat = _orig_nougat
+            _ingest_cfg.contextual_retrieval_enabled = _orig_ctx
+
         n_chunks = orch.db.execute(
             "SELECT COUNT(*) AS n FROM chunks WHERE doc_id = ? AND excluded = 0",
             (doc.doc_id,),
@@ -1565,6 +1674,8 @@ async def ingest_upload(
     file: UploadFile = File(...),
     background: bool = True,
     taxonomy_mode: str = "auto",
+    use_nougat: Optional[bool] = None,
+    contextual: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Document ingest from a browser upload.
 
@@ -1576,6 +1687,16 @@ async def ingest_upload(
       * ``"auto"``   — default; DocAssigner auto-files the doc at ingest.
       * ``"manual"`` — skip auto-assign; doc lands unfiled, user picks a node.
       * ``"skip"``   — alias of manual.
+
+    ``use_nougat``:
+      When ``true``, use Nougat-OCR to load PDFs for this upload (overrides
+      ``cfg.ingest.use_nougat``).  ``false`` forces PyMuPDF.  ``null``
+      (default) uses the global config value.
+
+    ``contextual``:
+      When ``true``, run the Anthropic Contextual Retrieval augmentation step
+      for this upload (overrides ``cfg.ingest.contextual_retrieval_enabled``).
+      ``false`` disables it for this upload.  ``null`` uses the global config.
     """
     cfg = _get_cfg()
     uid = cfg.user.default_user_id
@@ -1612,7 +1733,7 @@ async def ingest_upload(
         threading.Thread(
             target=_run_ingest_job,
             args=(job_id, uid, dest, name),
-            kwargs={"taxonomy_mode": taxonomy_mode},
+            kwargs={"taxonomy_mode": taxonomy_mode, "use_nougat": use_nougat, "contextual": contextual},
             daemon=True,
         ).start()
         return {
@@ -1624,7 +1745,8 @@ async def ingest_upload(
         }
 
     # Synchronous path — useful for the smoke benchmark.
-    _run_ingest_job(job_id, uid, dest, name, taxonomy_mode=taxonomy_mode)
+    _run_ingest_job(job_id, uid, dest, name, taxonomy_mode=taxonomy_mode,
+                    use_nougat=use_nougat, contextual=contextual)
     row = _get_job(job_id)
     if row["status"] == "failed":
         raise HTTPException(500, row["message"] or "ingest failed")
@@ -2106,14 +2228,21 @@ def taxonomy_move_doc(body: TaxonomyMoveDoc) -> dict[str, Any]:
 
 
 @app.post("/api/taxonomy/auto-assign/{doc_id}")
-def taxonomy_auto_assign_doc(doc_id: str) -> dict[str, Any]:
-    """Synchronously run ``DocAssigner.assign`` for a single doc.
+def taxonomy_auto_assign_doc(doc_id: str, background: bool = False) -> dict[str, Any]:
+    """Run ``DocAssigner.assign`` for a single doc.
 
     Used by the upload-flow "manual" mode: the user uploads a doc with
     ``taxonomy_mode=manual``, sees it in the unfiled list, then clicks
     "Auto-assign" if they don't want to drag it onto a node themselves.
 
-    Returns ``{"doc_id": ..., "assigned_node": "tx_..." or None}``.
+    With ``background=false`` (default) the response blocks until assignment
+    completes — suitable only when the tree is small or LLM summaries are
+    already cached.
+
+    With ``background=true`` the assign runs in a daemon thread and the
+    endpoint returns immediately with ``{"job_id": ..., "background": true}``.
+    The caller polls ``GET /api/jobs/{job_id}`` for the final state; the
+    result payload contains ``{"assigned_node": "tx_..." or None}``.
     """
     _require_taxonomy_store()  # raises 503 when taxonomy is disabled
     cfg = _get_cfg()
@@ -2121,24 +2250,60 @@ def taxonomy_auto_assign_doc(doc_id: str) -> dict[str, Any]:
     # Confirm the doc exists for the active user before we run the LLM.
     orch = _get_orch()
     row = orch.db.execute(
-        "SELECT doc_id FROM documents WHERE doc_id = ? AND user_id = ?",
+        "SELECT doc_id, title FROM documents WHERE doc_id = ? AND user_id = ?",
         (doc_id, uid),
     ).fetchone()
     if row is None:
         raise HTTPException(404, f"doc {doc_id!r} not found for user {uid!r}")
-    assigner = _build_doc_assigner()
-    # DocAssigner.assign returns None when the tree is empty or the doc has
-    # no chunks. We surface that to the caller as ``assigned_node: null``.
-    try:
+
+    def _do_assign() -> Optional[str]:
+        assigner = _build_doc_assigner()
         node_id = assigner.assign(uid, doc_id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
-    print(
-        f"[taxonomy] auto-assigned doc {doc_id} -> "
-        f"{node_id if node_id else '(none)'}",
-        flush=True,
+        print(
+            f"[taxonomy] auto-assigned doc {doc_id} -> "
+            f"{node_id if node_id else '(none)'}",
+            flush=True,
+        )
+        return node_id
+
+    if not background:
+        try:
+            node_id = _do_assign()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+        return {"doc_id": doc_id, "assigned_node": node_id}
+
+    # Background mode: spawn thread, return job_id immediately.
+    doc_title = (row["title"] or doc_id)[:60]
+    job_id = _create_job(
+        uid, kind="taxonomy_assign", total=1,
+        message=f"queued: {doc_title}",
     )
-    return {"doc_id": doc_id, "assigned_node": node_id}
+
+    def _worker() -> None:
+        try:
+            _update_job(
+                job_id, status="running", progress=0, total=1,
+                message=f"assigning: {doc_title}",
+            )
+            node_id = _do_assign()
+            _update_job(
+                job_id, status="done", progress=1, total=1,
+                message=f"filed under {node_id}" if node_id else "tree empty — unfiled",
+                result={"assigned_node": node_id, "doc_id": doc_id, "kind": "taxonomy_assign"},
+                completed=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _update_job(
+                job_id, status="failed",
+                message=f"{type(exc).__name__}: {exc}",
+                completed=True,
+            )
+
+    threading.Thread(
+        target=_worker, daemon=True, name=f"tax-assign-{job_id[:8]}",
+    ).start()
+    return {"job_id": job_id, "background": True, "kind": "taxonomy_assign", "doc_id": doc_id}
 
 
 @app.post("/api/taxonomy/clear")

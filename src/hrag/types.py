@@ -60,6 +60,11 @@ class RetrievalResult:
        CrossEncoderReranker    = float logit (typically -12..+12 for ms-marco models)
        BatchedLLMReranker      = int 0-3
     """
+    feedback_score: float = 0.0
+    """Phase 9.15 — EMA(thumbs_up - thumbs_down) in [-1, +1] range.
+       0.0 means no historical feedback signal for this chunk.
+       Populated by FeedbackScorer when cfg.retrieval.feedback_reranking_enabled=True.
+    """
 
 
 @dataclass

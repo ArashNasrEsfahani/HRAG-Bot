@@ -57,6 +57,22 @@ def _translate_ollama_error(exc: BaseException, model_name: str) -> LLMProviderE
     return LLMProviderError(f"Ollama call failed: {exc}")
 
 
+def estimate_num_keep(system_prompt: str, *, slack: int = 16) -> int:
+    """Estimate the num_keep value that covers a stable system-prompt prefix.
+
+    Uses a char-based heuristic (~4 chars/token) — cheap, no tokenizer
+    dependency. Returns the estimated token count + ``slack`` so the prefix
+    survives small wording tweaks across turns.
+
+    Phase 9.4 — called by Orchestrator.__init__ when ``llm.num_keep_auto``
+    is True and ``llm.num_keep`` has not been manually set.
+    """
+    if not system_prompt:
+        return 0
+    approx_tokens = max(1, len(system_prompt) // 4)
+    return approx_tokens + slack
+
+
 class LLMProvider(ABC):
     """Abstract LLM backend. Sync API; streaming can be added later."""
 
@@ -113,6 +129,10 @@ def get_llm_provider(config: LLMConfig) -> LLMProvider:
         return OpenAIProvider(config)
     if name == "anthropic":
         return AnthropicProvider(config)
+    if name == "openrouter":
+        return OpenRouterProvider(config)
+    if name == "gemini":
+        return GeminiProvider(config)
     raise ValueError(f"Unknown LLM provider: {config.provider!r}")
 
 
@@ -194,6 +214,34 @@ class OllamaProvider(LLMProvider):
         if request.stop:
             options["stop"] = request.stop
         return options
+
+    def warmup(self) -> None:
+        """Fire a 1-token chat() with the configured keep_alive so the model
+        is resident in VRAM before the user's first turn.
+
+        Phase 9.4 — called from ``Orchestrator.__init__`` when
+        ``cfg.llm.warmup_on_init`` is True. No-op if the Ollama server is
+        unreachable — startup must not crash if the user has not yet run
+        ``ollama serve``. Errors are translated via ``_translate_ollama_error``
+        and re-raised; the orchestrator catches and logs them at DEBUG so
+        warmup never blocks app start.
+        """
+        msgs = [{"role": "user", "content": "ping"}]
+        options: dict = {
+            "temperature": 0.0,
+            "num_predict": 1,
+        }
+        num_ctx = getattr(self.config, "num_ctx", None)
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+        num_keep = getattr(self.config, "num_keep", None)
+        if num_keep is not None and num_keep > 0:
+            options["num_keep"] = int(num_keep)
+        chat_kwargs = self._build_chat_kwargs(msgs, options)
+        try:
+            self._client.chat(**chat_kwargs)
+        except Exception as exc:
+            raise _translate_ollama_error(exc, self.config.model) from exc
 
     def verify_ready(self) -> None:
         """Check Ollama reachability and model availability without loading the model.
@@ -334,6 +382,12 @@ class AnthropicProvider(LLMProvider):
                 if piece:
                     yield piece
 
+    # Phase 9.5 — Anthropic recommends caching blocks that are at least ~1024
+    # tokens for Sonnet/Opus (smaller blocks are silently uncached). 1024
+    # chars is a conservative char-based proxy: prompts that short would also
+    # be too short to benefit from caching even if accepted.
+    _CACHE_MIN_CHARS = 1024
+
     def _build_kwargs(self, request: GenerationRequest) -> dict:
         # Anthropic API requires `system` to be top-level, not a message role.
         system_text = ""
@@ -353,8 +407,338 @@ class AnthropicProvider(LLMProvider):
             if request.max_tokens is not None
             else self.config.max_tokens,
         }
+        caching_on = getattr(self.config, "anthropic_prompt_caching", False)
         if system_text:
-            kwargs["system"] = system_text
+            if caching_on and len(system_text) >= self._CACHE_MIN_CHARS:
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                kwargs["system"] = system_text
+        # Mark the last user message with cache_control so the retrieved-
+        # passages suffix is reusable across nearby turns. Only applied when
+        # caching is on, the message exists, is plain string content (i.e.
+        # we're not stomping on a caller that pre-wrapped it), and crosses
+        # the minimum-size threshold.
+        if caching_on and msgs:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") != "user":
+                    continue
+                content = msgs[i].get("content")
+                if isinstance(content, str) and len(content) >= self._CACHE_MIN_CHARS:
+                    msgs[i] = {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                break
         if request.stop:
             kwargs["stop_sequences"] = request.stop
+        return kwargs
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter
+# ---------------------------------------------------------------------------
+
+
+def fetch_openrouter_free_models(api_key: str) -> list[dict]:
+    """Fetch the list of free models available on OpenRouter.
+
+    Queries https://openrouter.ai/api/v1/models and filters to entries where
+    both prompt and completion pricing are "0". Returns a list of dicts with
+    keys: id, name, context_length.
+    """
+    import httpx  # noqa: PLC0415
+
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.get(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    models = []
+    # Substrings that flag a non-chat model (audio-gen, music, VL-only, etc.)
+    _OR_NON_CHAT = ("lyria", "clip-preview")
+    for m in data.get("data", []):
+        pricing = m.get("pricing", {})
+        if pricing.get("prompt", "1") == "0" and pricing.get("completion", "1") == "0":
+            mid = m["id"]
+            if any(p in mid for p in _OR_NON_CHAT):
+                continue
+            models.append(
+                {
+                    "id": mid,
+                    "name": m.get("name", mid),
+                    "context_length": m.get("context_length"),
+                }
+            )
+    models.sort(key=lambda x: x["name"].lower())
+    return models
+
+
+class OpenRouterProvider(LLMProvider):
+    """LLM provider backed by OpenRouter (https://openrouter.ai).
+
+    OpenRouter exposes an OpenAI-compatible REST API and gives access to
+    hundreds of models — including free ones — via a single API key.
+    Reuses the `openai` SDK with a custom base URL and the HTTP headers
+    required by OpenRouter's terms of use.
+
+    Configuration:
+        provider: openrouter
+        model: <openrouter-model-id>          # e.g. mistralai/mistral-7b-instruct:free
+        api_key: <your-key>                   # or set OPENROUTER_API_KEY env var
+    """
+
+    name = "openrouter"
+    _BASE_URL = "https://openrouter.ai/api/v1"
+
+    def __init__(self, config: LLMConfig):
+        super().__init__(config)
+        api_key = config.openrouter_api_key or config.api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OpenRouter API key not found. "
+                "Set OPENROUTER_API_KEY env var or llm.api_key in config."
+            )
+        try:
+            from openai import OpenAI  # noqa: PLC0415
+        except ImportError as e:
+            raise ImportError(
+                "The 'openai' package is required for OpenRouterProvider. "
+                "Install with: pip install openai"
+            ) from e
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=config.base_url or self._BASE_URL,
+            default_headers={
+                "HTTP-Referer": "https://github.com/hrag-bot",
+                "X-Title": "HRAG-Bot",
+            },
+        )
+
+    def generate(self, request: GenerationRequest) -> GenerationResponse:
+        kwargs = self._build_kwargs(request)
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if self._is_rate_limited(exc):
+                kwargs["model"] = self._fallback_model(kwargs["model"])
+                resp = self._client.chat.completions.create(**kwargs)
+            else:
+                raise
+        text = resp.choices[0].message.content or ""
+        return GenerationResponse(text=text, raw=resp)
+
+    def generate_stream(self, request: GenerationRequest) -> Iterator[str]:
+        kwargs = self._build_kwargs(request)
+        kwargs["stream"] = True
+        try:
+            stream = self._client.chat.completions.create(**kwargs)
+            yield from self._drain_stream(stream)
+        except Exception as exc:  # noqa: BLE001
+            if self._is_rate_limited(exc):
+                kwargs["model"] = self._fallback_model(kwargs["model"])
+                stream = self._client.chat.completions.create(**kwargs)
+                yield from self._drain_stream(stream)
+            else:
+                raise
+
+    @staticmethod
+    def _drain_stream(stream) -> Iterator[str]:
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                yield piece
+
+    @staticmethod
+    def _is_rate_limited(exc: Exception) -> bool:
+        """Return True when the exception is a 429 / upstream rate-limit."""
+        msg = str(exc).lower()
+        return "429" in msg or "rate-limit" in msg or "rate_limit" in msg or "temporarily" in msg
+
+    def _fallback_model(self, current_model: str) -> str:
+        """Pick a different free model when the current one is rate-limited."""
+        import logging  # noqa: PLC0415
+        _log = logging.getLogger(__name__)
+        _STATIC_FALLBACK = "meta-llama/llama-3.3-70b-instruct:free"
+        try:
+            api_key = (
+                self.config.openrouter_api_key
+                or self.config.api_key
+                or os.environ.get("OPENROUTER_API_KEY", "")
+            )
+            models = fetch_openrouter_free_models(api_key)
+            for m in models:
+                if m["id"] != current_model:
+                    _log.warning(
+                        "OpenRouter: %s rate-limited — auto-switching to %s",
+                        current_model, m["id"],
+                    )
+                    return m["id"]
+        except Exception:  # noqa: BLE001
+            pass
+        _log.warning(
+            "OpenRouter: %s rate-limited — static fallback to %s",
+            current_model, _STATIC_FALLBACK,
+        )
+        return _STATIC_FALLBACK
+
+    def _build_kwargs(self, request: GenerationRequest) -> dict:
+        msgs = [{"role": m.role, "content": m.content} for m in request.messages]
+        kwargs: dict = {
+            "model": self.config.model,
+            "messages": msgs,
+            "temperature": (
+                request.temperature
+                if request.temperature is not None
+                else self.config.temperature
+            ),
+            "max_tokens": (
+                request.max_tokens
+                if request.max_tokens is not None
+                else self.config.max_tokens
+            ),
+        }
+        if request.stop:
+            kwargs["stop"] = request.stop
+        return kwargs
+
+
+# ---------------------------------------------------------------------------
+# Gemini (Google Generative AI - OpenAI-compatible endpoint)
+# ---------------------------------------------------------------------------
+
+# Patterns that flag a model as non-chat (TTS, image-gen, robotics, etc.)
+_GEMINI_NON_CHAT = (
+    "-tts", "-image", "robotics", "deep-research",
+    "computer-use", "lyria", "antigravity", "nano-", "gemma-",
+)
+
+
+def fetch_gemini_models(api_key: str) -> list[dict]:
+    """Return Gemini text-chat models from the REST models API.
+
+    Queries /v1beta/models, keeps only entries that support generateContent
+    and do not look like TTS / image / robotics models.
+    Returns [{id, name, context_length}] sorted by id.
+    """
+    import httpx  # noqa: PLC0415
+
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": api_key, "pageSize": 200},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    models = []
+    for m in data.get("models", []):
+        if "generateContent" not in m.get("supportedGenerationMethods", []):
+            continue
+        mid = m["name"].removeprefix("models/")
+        if any(pat in mid for pat in _GEMINI_NON_CHAT):
+            continue
+        models.append(
+            {
+                "id": mid,
+                "name": mid,
+                "context_length": m.get("inputTokenLimit"),
+            }
+        )
+    models.sort(key=lambda x: x["id"])
+    return models
+
+
+class GeminiProvider(LLMProvider):
+    """LLM provider backed by Google Gemini via its OpenAI-compatible endpoint.
+
+    Google exposes https://generativelanguage.googleapis.com/v1beta/openai/
+    as a drop-in OpenAI REST surface so this provider reuses the openai SDK
+    without requiring the google-generativeai package.
+
+    Configuration::
+
+        provider: gemini
+        model: gemini-2.5-flash       # any id from GET /api/llm/gemini/models
+        api_key: <your-key>           # or set GEMINI_API_KEY env var
+    """
+
+    name = "gemini"
+    _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    def __init__(self, config: LLMConfig):
+        super().__init__(config)
+        api_key = config.gemini_api_key or config.api_key or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "Gemini API key not found. "
+                "Set GEMINI_API_KEY env var or llm.api_key in config."
+            )
+        try:
+            from openai import OpenAI  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError(
+                "The openai package is required for GeminiProvider. "
+                "Install with: pip install openai"
+            ) from exc
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=config.base_url or self._BASE_URL,
+        )
+
+    def generate(self, request: GenerationRequest) -> GenerationResponse:
+        kwargs = self._build_kwargs(request)
+        resp = self._client.chat.completions.create(**kwargs)
+        text = resp.choices[0].message.content or ""
+        return GenerationResponse(text=text, raw=resp)
+
+    def generate_stream(self, request: GenerationRequest) -> Iterator[str]:
+        kwargs = self._build_kwargs(request)
+        kwargs["stream"] = True
+        stream = self._client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                yield piece
+
+    def _build_kwargs(self, request: GenerationRequest) -> dict:
+        msgs = [{"role": m.role, "content": m.content} for m in request.messages]
+        kwargs: dict = {
+            "model": self.config.model,
+            "messages": msgs,
+            "temperature": (
+                request.temperature
+                if request.temperature is not None
+                else self.config.temperature
+            ),
+            "max_tokens": (
+                request.max_tokens
+                if request.max_tokens is not None
+                else self.config.max_tokens
+            ),
+        }
+        if request.stop:
+            kwargs["stop"] = request.stop
         return kwargs

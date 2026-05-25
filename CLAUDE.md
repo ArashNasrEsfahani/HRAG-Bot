@@ -4,270 +4,193 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Visibility — every long-running process must show progress
 
-User invariant: any process expected to take more than ~10 seconds must surface progress in real time. No silent waits. Specifically:
+User invariant: any process expected to take more than ~10 seconds must surface progress in real time. No silent waits.
 
 - **Foreground long commands** — wrap with a `rich.progress.Progress` bar driven by a known count (chunks, docs, communities, benchmark questions). When the count isn't knowable upfront, emit a per-item line with a running tally (`[i/n] processing X...`) and flush stdout (`print(..., flush=True)`).
-- **Background commands** (Bash `run_in_background: true`) — set up a `Monitor` over the log file with `grep --line-buffered` filtering for per-item completion + failure signatures. Cover failure cases (Traceback, UnicodeError, "killed", non-zero exit), not only the happy path — silence on crash is the bug.
-- **Subagents** — every subagent prompt must require a final structured report with what it did. Long-running agent work that the user is waiting on should be foreground (user sees the agent's intermediate work) or background with a Monitor on its output file (only when the agent's output is mostly noise and the user only needs the summary).
-- **Existing CLI commands lacking progress** (e.g. `hrag rebuild-kg`'s community-summarization phase printed nothing for 15 minutes) are a bug. Fix the source so the next run is observable. Per-item prints with `flush=True` are the floor; a Rich progress bar is the target.
-- **Don't ask "should I proceed?" on long jobs without first showing the user a progress channel they can watch.** The right pattern is: arm the monitor → start the job → tell the user what to expect → the job streams.
+- **Background commands** (Bash `run_in_background: true`) — set up a `Monitor` over the log file with `grep --line-buffered` filtering for per-item completion + failure signatures. Cover failure cases (Traceback, UnicodeError, "killed", non-zero exit), not only the happy path.
+- **Subagents** — every subagent prompt must require a final structured report. Long-running agent work the user is waiting on should be foreground, or background with a Monitor on its output file.
+- **Existing CLI commands lacking progress** are a bug. Fix the source. Per-item prints with `flush=True` are the floor; a Rich progress bar is the target.
+- **Don't ask "should I proceed?" on long jobs without first showing a progress channel.** Pattern: arm the monitor → start the job → tell the user what to expect → the job streams.
 
-This rule applies project-wide and supersedes any agent-prompt template that omits progress hooks.
+This rule supersedes any agent-prompt template that omits progress hooks.
 
-## Subagent dispatch policy (default for every non-trivial request)
+## Subagent dispatch policy
 
-For any request that decomposes into 2+ work items, dispatch the work to subagents instead of doing it serially in the main thread. Pick the model per item by importance × difficulty:
+For any request that decomposes into 2+ work items, dispatch to subagents. Pick model per item by importance × difficulty:
 
-- **Opus** — algorithmically tricky, security-sensitive, cross-cutting wiring, novel design with multiple invariants, anything where a wrong call ripples into several files. Examples in this codebase: graph store with synonym merging, MST + redundancy pruning, query router with RRF fusion, prompt design.
-- **Sonnet** — well-scoped mechanical work, single-file modules following an existing pattern, test-only additions, config/schema/dep edits, factory registrations. Examples: new `Retriever` impl following `VectorRetriever` shape, NER wrapper, ingest pipeline hook, CLI subcommand.
+- **Opus** — algorithmically tricky, security-sensitive, cross-cutting wiring, novel design with multiple invariants. Examples: graph store with synonym merging, MST + redundancy pruning, query router with RRF fusion, prompt design.
+- **Sonnet** — well-scoped mechanical work, single-file modules following an existing pattern, test-only additions, config/schema/dep edits, factory registrations.
 
-Fan out in waves: agents on disjoint files run in parallel (single message with multiple `Agent` tool calls); only serialize when later work depends on an earlier deliverable. After each wave, the main thread (Opus 4.7) verifies — `pytest`, ruff, schema sanity — before dispatching the next wave. Coordination overhead is a real cost; don't shard work smaller than ~one file per agent.
+Fan out in waves: agents on disjoint files run in parallel (single message, multiple `Agent` calls); only serialize when later work depends on an earlier deliverable. After each wave, the main thread verifies — `pytest`, ruff, schema sanity. Don't shard work smaller than ~one file per agent. Trivial single edits: just do it inline.
 
-When the request is a single trivial edit, just do it inline — no subagents.
+## Project status (phase-by-phase summary)
 
-## Project status
+**Phase 1** — walking-skeleton RAG (ingest → vector → rerank → answer). Complete.
 
-**Phase 1** (walking-skeleton RAG: ingest → vector retrieve → rerank → answer) — complete.
+**Phase 2** (KG triple extraction + PPR + GraphRAG communities + LLM router + KG2RAG MST organizer) — complete, 381 tests. Behind `kg.enabled`. Modules: `kg/builder.py` (TripleExtractor), `kg/store.py` (NetworkX MultiDiGraph, synonym merge cos≥0.8, SQLite mirror), `kg/ner.py` (SpacyNER default, LLMNER opt-in), `kg/ppr.py` (scipy power iteration), `kg/communities.py` (Leiden at 3 resolutions, Chroma `hrag_community_summaries` + SQLite mirror), `retrieval/{kg_ppr,community,router,mst}.py`.
 
-**Phase 2** (hierarchical retrieval: KG triple extraction + Personalized PageRank + GraphRAG community summaries + LLM-routed retriever + KG2RAG MST organizer) — **implementation complete**, 381 passing tests. Behind `kg.enabled` flag.
+**Phase 3 — Personalization** (memory layer + LLM-proposed taxonomy) — complete, 537 tests. Default retriever is `taxonomy` (falls back to vector when tree empty).
+- Memory: `memory/profile.py` (ProfileStore — rendered as `{user_profile}` into every answer prompt), `memory/store.py` (EpisodicMemoryStore, `/remember` `/recall` `/forget`, episodic chunks live in `chunks` with `source_type='episodic'`), `memory/{auto_extract,extractor}.py`, `context/builder.py`.
+- Taxonomy: `taxonomy/store.py` (packed-float32 centroids, beam descend), `taxonomy/builder.py` (parallel summaries → LLM tree with explicit `max_tokens=8192` + truncation-salvage), `taxonomy/assigner.py` (cosine descent + LLM tiebreak when top-2 < 0.05 apart), `retrieval/taxonomy.py` (exposes `describe_last_descend()`), tables `kg_taxonomy_{nodes,assignments,doc_meta}`, flag `taxonomy.include_episodic` (default true).
 
-**Phase 2 modules:**
-- `src/hrag/kg/builder.py` — `Triple` + `TripleExtractor` (concurrent OpenIE per chunk via `prompts/triple_extraction.md`)
-- `src/hrag/kg/store.py` — `KGStore` (NetworkX `MultiDiGraph` with phrase + passage nodes, synonym merging via embedding cosine ≥ 0.8, idempotent per-doc upsert, SQLite mirror at `kg_nodes`/`kg_edges`)
-- `src/hrag/kg/ner.py` — `SpacyNER` (default, lazy spaCy + regex fallback) and `LLMNER` (opt-in via `kg.ner: llm`)
-- `src/hrag/kg/ppr.py` — pure-scipy `personalized_pagerank` (power iteration with dangling-node redistribution)
-- `src/hrag/kg/communities.py` — Leiden detection (`leidenalg`+`python-igraph`) at three resolutions, concurrent summarization (`prompts/community_summary.md`), Chroma collection `hrag_community_summaries` + SQLite `kg_communities` mirror, `detect_and_summarize` one-call entry point
-- `src/hrag/retrieval/kg_ppr.py` — `Retriever` impl: NER → seeds → PPR → passage hydration
-- `src/hrag/retrieval/community.py` — `Retriever` impl over community summaries (returns `RetrievalResult` with `source_type="community"`)
-- `src/hrag/retrieval/router.py` — `QueryRouter` 5-shot LLM classifier (`prompts/router.md`) routing to entity / global / cross_document / ambiguous, RRF-fusing the cross_document and ambiguous paths, with per-query cache and graceful degradation
-- `src/hrag/retrieval/mst.py` — `MSTOrganizer` (KG2RAG redundancy filter + tree-ordering, no-op when KG empty)
+**Phase 4** (compaction & gating: RAGate, clue, dialog MST, `[UNCERTAIN]` masking) — complete, 691+ tests. All four behind `compaction.*` flags, default OFF.
+- Modules: `gating/{gate,clue,uncertain}.py`, `context/dialog_mst.py`, `CompactionConfig`. `prompts/answer.md` Step 4 writes `[UNCERTAIN]` after unsupported sub-claims.
+- Orchestrator integration order: dialog compaction (after history) → RAGate (FACTUAL only; SKIP forces `plan.scope="none"` + intent→GENERAL) → clue generation (replaces retrieval query) → `render_uncertain` / silent `strip_uncertain`.
+- Progress events: `dialog_compact`, `gate_check`, `clue_generate`, `uncertain_render`.
 
-**Phase 3 — Personalization** (per-user memory layer + hierarchical document taxonomy) — **complete**, 537 passing tests. Default retriever is now `taxonomy` (falls back to vector when the tree is empty).
+**Phase 5** (web ergonomics + extensibility) — complete, 700 tests.
+- Track A (web UX): memory CRUD `POST/PUT/DELETE /api/memories`, multipart `POST /api/ingest`, background jobs (`POST /api/ingest?background=true` → `GET /api/jobs/{id}`), `jobs` table.
+- Track B (verification): `tests/benchmark/run_phase5_web.py` over TestClient.
+- Track C (pluggable backends): `kg/backends/{base,networkx,neo4j}.py` (KGBackend Protocol, 18 methods), `retrieval/backends/{base,chroma,sqlite_vec}.py` (VectorBackend Protocol, 5 methods). Factories `KGStore.from_config` + `_build_vector_backend`.
+- Track D (self-improvement loop): `feedback` table (`message_id, rating, note`), `POST/GET/DELETE /api/feedback`, 👍/👎 in UI, `hrag export-training-pairs` JSONL.
+- Track E (equation-aware ingest): `ingest/math_detect.py` (`find_display_math_spans`, `has_math` for `$$...$$`, `\begin{equation|align|...}`, inline `$...$` / `\(...\)`), chunker boundary nudge so math never splits, `quality.py` carve-outs when `metadata.has_math`.
 
-Memory sublayer (preferences + episodic notes + auto-extraction):
-- `src/hrag/memory/profile.py` — `ProfileStore` (preferences table; rendered verbatim into every answer prompt as `{user_profile}`).
-- `src/hrag/memory/store.py` — `EpisodicMemoryStore` (`/remember`, `/recall`, `/forget`; episodic chunks live in `chunks` with `source_type='episodic'` and compete with documents at retrieval).
-- `src/hrag/memory/auto_extract.py` — `SessionAutoExtractor` (opt-in via `memory.auto_extract`; one extra LLM call on session close, daemon thread).
-- `src/hrag/memory/extractor.py` — `PreferenceExtractor` (uses `prompts/preference_extract.md`).
-- `src/hrag/context/builder.py` — `ContextBuilder` (assembles the `{user_profile}` block from `ProfileStore`).
+**Phase 6** (real backends + adaptive retrieval + Ollama warmth) — complete, 726 tests, 8/8 acceptance.
+- A: `retrieval/backends/sqlite_vec.py` real impl (~390 LOC, `vec0` virtual table, `distance_metric=cosine` → Chroma-shape distances, where-compiler handles `$and`/`$or`/`$eq`/`$ne`/`$in`).
+- B: `kg/backends/neo4j.py` real impl (~370 LOC, all 18 protocol methods, single `:Node`/`:LINK`, `__json_attrs` sidecar for non-primitive attrs, clean RuntimeError on missing URI/driver, zero import side effects).
+- C (adaptive top_k per intent): `_adaptive_top_k` maps intent → `(top_k_vector, top_k_final)`; `(None, None)` skips retrieval (GREETING default). PERSONAL broadens `source_types` to `["document","episodic"]` and stable-sorts episodic to top. Events: `adaptive_top_k`, `retrieval_skipped`, `episodic_bias_applied`. Default off.
+- D: `cfg.llm.keep_alive` threaded as top-level chat() kwarg. Default `"30m"`.
 
-Taxonomy sublayer (LLM-proposed, user-editable category tree over docs + memories; default retriever):
-- `src/hrag/taxonomy/store.py` — `TaxonomyStore` (CRUD, packed-float32 centroids, in-memory beam descend with cached node map).
-- `src/hrag/taxonomy/builder.py` — `TaxonomyBuilder` (parallel doc summaries → batched centroid embed → LLM tree proposal with explicit `max_tokens=8192` + truncation-salvage → materialize → overflow assignment → recompute centroids).
-- `src/hrag/taxonomy/assigner.py` — `DocAssigner` (greedy cosine descent + LLM tiebreak when top-2 scores < 0.05 apart; used by the ingest auto-assign hook and the GUI's "Assign all unfiled" button).
-- `src/hrag/retrieval/taxonomy.py` — `TaxonomyRetriever` (beam descend → over-fetch from Chroma → filter to leaf docs → hydrate; falls back to `taxonomy.fallback_retriever` when tree is empty). Exposes `describe_last_descend()` for the GUI's tree-navigation visual.
-- `src/hrag/prompts/taxonomy_*.md` — `taxonomy_doc_summary.md`, `taxonomy_propose.md`, `taxonomy_relabel.md`, `taxonomy_route_tiebreak.md`.
-- `src/hrag/gui/pages/8_Taxonomy.py` — graphviz tree + per-node edit panel (label, description, move, add child, delete, unfile).
-- Tables: `kg_taxonomy_nodes`, `kg_taxonomy_assignments`, `kg_taxonomy_doc_meta` (the doc-meta cache survives `clear()` by default; pass `wipe_doc_meta=True` for a full reset).
-- `taxonomy.include_episodic` (default `true`) — episodic memories are filed under the same tree as documents.
+**Phase 7-A** (math handling: detector + filter + extraction) — complete, 755 tests, 5/5 acceptance. Triggered by failure: HRAG retrieved formula-free chunks for "give me some formulas hipporag uses" despite 72 chunks with Unicode math.
+- Method 1: `has_unicode_math(text, min_signals=2)` over Greek/math-italic letters, operators (`∑∫∏√∞≤≥≠≈⟨⟩⊕⊗⋅`), sub/superscripts, equation density, function patterns. `has_math = _has_latex_math or has_unicode_math`. `scripts/backfill_has_math.py` tagged 63/1082 chunks.
+- Method 2: `_expand_math_meta(query)` in `HeuristicRewriter` appends `"equation parameter θ Θ loss function ..."` to meta-queries. Cosine vs `𝑌=Θ(𝑞|𝜃)` jumps from ~0.10 to ~0.35.
+- Method 3: `_is_math_meta_query` (pure regex) + `where={"has_math": True}` filter pushdown + lowered rerank threshold (`-10.0`) + empty-result fallback. Optional formula-extraction second LLM call against `prompts/extract_formulas.md`. Events: `math_meta_filter`, `math_meta_filter_fallback`, `formula_extract`.
+- Retriever Protocol widened: `where: Optional[dict] = None`. Vector-backed retrievers thread through to `VectorStore.query`; `bm25`, `kg_ppr`, `community` accept and silently ignore.
 
-**Phase 4** (compaction & gating: RAGate, clue generation, dialog MST, `[UNCERTAIN]` masking) — **implementation complete**, 691+ passing tests. All four features behind `compaction.*` flags, default OFF.
+**Phase 6+7 wrap-up** (5 deferred items) — complete, 797 tests, 19/19 acceptance.
+- **6-B1**: `cfg.retrieval.adaptive_retriever_per_intent` (5 intents → retriever name or `"default"`). `Orchestrator._pick_retriever_for_intent` caches; missing-dep falls back. Event `adaptive_retriever_picked`.
+- **6-B2**: `feedback_stats.py::feedback_summary(db)` shared by CLI + web. CLI: `hrag feedback-stats`, `hrag feedback-export`. API: `GET /api/feedback/stats`. GUI: Feedback drawer.
+- **6-B3**: `cfg.llm.num_keep: Optional[int]` threaded into `options.num_keep` (NOT top level — Ollama silently ignores there).
+- **7-B**: `EmbeddingsConfig.suggested_models` (all-mpnet, specter2, jina-v2, bge-small). `dimension_for_model()` helper. CLI: `hrag embeddings-list/current`. API: `GET /api/embeddings/suggested`.
+- **7-C**: `ingest/nougat_loader.py` with deferred imports (zero side effects). `_load_pdf` dispatches to Nougat when `cfg.ingest.use_nougat=True` AND dep installed; silent PyMuPDF fallback. API: `GET /api/ingest/nougat_status`.
 
-**Phase 4 modules:**
-- `src/hrag/gating/gate.py` — `RAGate` (single LLM call against `prompts/gate.md`, fail-open on garbled output)
-- `src/hrag/gating/clue.py` — `ClueGenerator` (MemoRAG-style hypothesis against `prompts/clue.md`, fallback to question on empty/error)
-- `src/hrag/gating/uncertain.py` — `render_uncertain` / `strip_uncertain` (pure regex post-processor for `[UNCERTAIN]` tokens)
-- `src/hrag/context/dialog_mst.py` — `DialogMSTCompactor` (greedy cosine clustering + per-cluster summarization via `prompts/dialog_summary.md`)
-- `src/hrag/config.py::CompactionConfig` — toggles for all four features
-- `prompts/answer.md` — Step 4 instructs the LLM to write `[UNCERTAIN]` after unsupported sub-claims
+**Phase 8** (interactive retrieval review loop) — complete, 897 tests, 5/5 acceptance. Triggered by "stars and moon" off-corpus failure — HRAG paid for retrieval+reasoning+apology when negative rerank scores already proved off-corpus.
 
-**Orchestrator integration points (in `chat()` pipeline order):**
-1. After history load → dialog compaction
-2. After intent classification → RAGate (FACTUAL only; SKIP forces `plan.scope = "none"` and re-routes intent to GENERAL)
-3. After query rewrite → clue generation (replaces retrieval query; original question still feeds answer prompt)
-4. After answer generation → `render_uncertain` (when `mask_uncertain=True`) else silent `strip_uncertain`
+Pause between retrieval and answer generation. Orchestrator emits `review_required` SSE with sources, clue, taxonomy descend, 0–3 rephrasings; frontend renders modal; user POSTs decision to `/api/chat/turns/{id}/resume`. All 13 sub-features (A–M) ship behind `interaction.review_enabled` (default OFF).
+- `interaction/store.py` (InteractionStore, daemon reaper, idempotent `submit_decision`, `wait_for_decision`).
+- `interaction/review.py` (`should_pause()` 7 trigger heuristics, `build_review_payload()`, `generate_rephrasings()`, `maybe_pause()`).
+- `InteractionConfig` (13 fields).
+- `messages.metadata TEXT` column via idempotent ALTER TABLE.
+- Orchestrator: long-lived `InteractionStore`; `turn_id` on `start` event; pause hook between `organize_done` and prompt; action dispatcher (`continue/filter/rephrase/general/clarify/expand_doc/redescend/abort`); FACTUAL→GENERAL silent swap now gated on `action=="continue"`; follow-ups between `generate` and `done`.
+- Web: `POST /api/chat/turns/{id}/resume` (pydantic Literal validation, idempotent), `POST /api/chat/turns/{id}/why_source`, SSE relays `review_required`/`review_resolved`/`followups` as dedicated event types.
+- Frontend: `#review-modal` with `.review-modal[hidden] { display: none !important; }` guard; auto-promotion (continue→filter/general/rephrase based on user edits); keyboard shortcuts (Enter/Esc/1-9/E/R/G/C).
+- Prompts: `rephrase.md`, `clarify.md`, `followups.md`, `why_source.md`.
 
-New progress events: `dialog_compact`, `gate_check`, `clue_generate`, `uncertain_render`.
+**Phase 8.1** — memory recall fix: `cfg.retrieval.always_include_episodic` (default True) includes episodic memories for ALL intents, not only PERSONAL. PERSONAL stable-sort preserved on top.
 
-**Phase 5 — Web ergonomics + extensibility** — **complete**, 700 passing tests.
+**Phase 9** (speed, observability & accuracy quick wins) — complete, 1051 tests, 17 tickets behind default-off flags (9.3, 9.4, 9.11, 9.12 default ON as pure-speed wins).
 
-**Phase 5 modules:**
-- **Track A (web UX)** —
-  - `src/hrag/web/app.py` adds memory CRUD (`POST` / `PUT` / `DELETE /api/memories`), multipart upload (`POST /api/ingest`), background ingest jobs (`POST /api/ingest?background=true` → `GET /api/jobs/{id}`).
-  - `src/hrag/web/static/{index.html,app.js,styles.css}` — inline memory edit/add cards, drag-and-drop upload zone with per-file progress bar, job-polling flow.
-  - `jobs` table in `src/hrag/db/schema.sql` (job_id, kind, status, progress, total, message, result).
-- **Track B (verification)** — `tests/benchmark/run_phase5_web.py` exercises the FastAPI layer over `TestClient`: config roundtrip, SSE event order, session continuity, hot-swap, memory CRUD.
-- **Track C (pluggable backends)** —
-  - `src/hrag/kg/backends/{base,networkx,neo4j}.py` defines `KGBackend` Protocol (18 methods) + NetworkX (default) + Neo4j stub. `KGStore.from_config` factory swaps by `kg.backend`.
-  - `src/hrag/retrieval/backends/{base,chroma,sqlite_vec}.py` defines `VectorBackend` Protocol (5 methods) + Chroma (default) + sqlite-vec stub. `_build_vector_backend` factory in `orchestrator.py`.
-- **Track D (self-improvement loop)** —
-  - `feedback` table in `schema.sql` (`message_id`, `rating`, `note`).
-  - `src/hrag/web/app.py` adds `POST/GET/DELETE /api/feedback`.
-  - Web UI shows 👍/👎 buttons under assistant messages, pre-marked on session replay.
-  - `hrag export-training-pairs --out pairs.jsonl` exports JSONL for downstream fine-tuning.
-- **Track E (equation-aware ingest)** —
-  - `src/hrag/ingest/math_detect.py` (new) — `find_display_math_spans`, `has_math` detectors covering `$$...$$`, `\begin{equation|align|eqnarray|gather}` (with `*`), and inline `$...$` / `\(...\)`.
-  - `chunker.py` — boundary nudge so display-math blocks never split; oversized equations emit as a single over-budget chunk rather than getting shredded.
-  - `quality.py` — `min_alpha_ratio` and `min_tokens` carve-outs when `metadata.has_math` is `True`.
-  - PyMuPDF caveat (no LaTeX reconstruction from PDFs) documented in `loaders.py`.
+- **9.1** `tests/benchmark/run_latency.py` — per-stage TTLT harness over fixed 20-Q set; markdown + JSON output.
+- **9.2** `retrieval.async_preflight_enabled` — gate/clue/intent futures via ThreadPoolExecutor; mutually exclusive with combined preflight (combined wins). Event `async_preflight`.
+- **9.3** `embeddings.query_cache_enabled` (ON) + `query_cache_size` — per-session LRU on `embed_one`; ambient session id via contextvar.
+- **9.4** `llm.warmup_on_init` (ON) + `llm.num_keep_auto` — one-token Ollama warm-up; optional auto-tune of `num_keep` from `answer.md` prefix.
+- **9.5** `llm.anthropic_prompt_caching` — wraps system + last user message in `cache_control={"type":"ephemeral"}` when ≥1024 chars; no-op otherwise.
+- **9.6** `compaction.combined_preflight_enabled` — one LLM call against `prompts/combined_preflight.md` returns `{intent, gate, clue}` JSON. Re-emits per-stage events with `source="combined"`.
+- **9.7** `embeddings.embed_precision` — fp32 / fp16 / onnx_int8 backends; silent fallback to fp32.
+- **9.8** `retrieval.rerank_quantize` — INT8 ONNX cross-encoder via `optimum`. ~2-3× rerank throughput on CPU.
+- **9.9** `retrieval.rerank_fallback_telemetry_enabled` + `rerank_fallback_events` table — logs `{turn_id, query, dropped_chunk_ids}` when zero-filter trips. Surfaced via `feedback_summary()["rerank_fallback_count"]`.
+- **9.10** `retrieval.first_token_latency_enabled` — wall-clock to first streamed token; persists at `messages.metadata.latency.first_token_ms`.
+- **9.11** `retrieval.router_short_circuit` (ON) — `QueryRouter` skips RRF for clearly-routed `entity`/`global` queries.
+- **9.12** `kg.dedup_enabled` (ON) + `kg_canonical_triples` table — cross-chunk triple dedup keyed on `(canonical_subject, relation, canonical_object)`; `freq` counter on re-sighting.
+- **9.13** `compaction.context_compression_enabled` + `context_budget_chars` — when prompt exceeds budget, drops bottom-quartile passages by rerank score + summarises oldest half of history. Emits `context_compress`.
+- **9.14** `ingest.contextual_retrieval_enabled` — **Anthropic Contextual Retrieval**. One LLM call per chunk at ingest prepends a 50–100-token context line to `chunk.embedding_text` (HeteRAG fusion target — NOT `chunk.text`); cached in `ingest_context_cache` keyed by `sha256(chunk_text||doc_hash||model_name)`. Modules: `ingest/contextual.py` (ContextualAugmenter, ThreadPoolExecutor, per-chunk SQLite cache, per-item flush + 3 progress events), `prompts/contextual_chunk.md`, `IngestConfig` 4 new fields. Pipeline step 2c between quality-filter and chunk upsert; skips episodic. Events: `contextual_augment_{start,chunk,done}`. Anthropic reports ~35% reduction in retrieval failures (~67% combined w/ BM25 + reranking).
+- **9.15** `retrieval.feedback_reranking_enabled` + `feedback_reranking_{weight,alpha}` — EMA(👍−👎) per chunk nudges cross-encoder score; emits `feedback_rerank_applied`.
+- **9.16** `retrieval.crag_enabled` + `crag_score_floor` + `crag_retry_top_k_multiplier` — automatic CRAG-style rewrite + widened-`top_k` retry when post-rerank top score below floor AND no Phase-8 review steered the turn. Cap one retry; emits `crag_reroute`.
+- **9.17** `compaction.self_rag_enabled` + `self_rag_max_spans` — scans for `[UNCERTAIN]`, runs one retrieval pass per span (max N) against preceding sentence, appends `**Sources for uncertain claims:**`. Pure-function `extract_uncertain_spans()` in `gating/uncertain.py`.
 
-**Closed in Phase 5 (originally scoped for it):** streaming refinements (web SPA replaced Streamlit with SSE + plain-text fast-path), fine-tuning hooks (feedback table + JSONL export), optional Neo4j / sqlite-vec backends (protocols + stubs ready), equation-aware ingest.
+**Deferred (still):** actually running Nougat over a corpus, swapping to math-aware embedder + re-ingest, feedback-loop fine-tuning training infra, cross-turn KV-cache reuse via Ollama prefix tokens beyond `num_keep`.
 
-**Deferred (not in Phase 5):** real Neo4j / sqlite-vec implementations (stubs raise `NotImplementedError`), adaptive retrieval per intent, Ollama prompt-caching across turns. → All three landed in Phase 6.
+## Contracts — load-bearing invariants (must survive future phases)
 
-**Phase 6 — Backends + adaptive retrieval + Ollama warmth** — **complete**, 726 passing tests, 8/8 acceptance benchmark.
+These are numbered globally; phase numbering shows when they were introduced.
 
-**Phase 6 modules:**
-- **Track A (sqlite-vec real backend)** — `src/hrag/retrieval/backends/sqlite_vec.py` (~390 LOC) replaces the stub with a real `vec0` virtual-table impl + typed `chunks_meta` mirror for filter pushdown. Uses `vec0(... distance_metric=cosine)` so distances arrive in Chroma's `1 − cos_sim` shape directly. Where-compiler handles flat equality plus `$and` / `$or` / `$eq` / `$ne` / `$in`. Optional dep group `sqlite-vec` in `pyproject.toml`; `tests/test_sqlite_vec_backend.py` has 9 tests (skip cleanly without the extension).
-- **Track B (Neo4j real backend)** — `src/hrag/kg/backends/neo4j.py` (~370 LOC) implements all 18 protocol methods against parameterised Cypher. Single label `:Node`, single rel `:LINK`; multi-edges keyed by `uuid4().hex`. Non-primitive attrs serialised into a `__json_attrs` sidecar property. `Neo4jBackend()` raises a clear `RuntimeError` when no URI / driver is configured; class import has zero side effects. Optional dep group `neo4j` in `pyproject.toml`; `tests/test_neo4j_backend.py` has 13 tests, double-guarded (`importorskip("neo4j")` + `NEO4J_URI` env check) so CI stays green without a server.
-- **Track C (Adaptive retrieval per intent)** — `src/hrag/orchestrator.py::_adaptive_top_k` resolver maps each intent to a `(top_k_vector, top_k_final)` pair; `(None, None)` signals "skip retrieval entirely" (greeting = 0 by default). GREETING short-circuits the gate / clue / retriever / reranker / organizer. PERSONAL broadens `source_types` to `["document", "episodic"]` and stable-sorts episodic chunks to the top. Three new progress events: `adaptive_top_k`, `retrieval_skipped`, `episodic_bias_applied`. Off by default (`retrieval.adaptive_enabled: false`); 12 tests in `tests/test_adaptive_retrieval.py`.
-- **Track D (Ollama keep-alive)** — `src/hrag/providers/llm.py` threads `cfg.llm.keep_alive` into the chat() top-level kwarg (not inside `options`). Default `"30m"` so the model stays resident through a typical multi-turn conversation; `None` defers to Ollama's own 5-minute default; `"-1s"` never unloads. 5 tests in `tests/test_keep_alive.py`.
+**Phase 3 (1–8):**
+1. `documents.source_type` and `chunks.source_type` ('document'|'episodic') must stay. `taxonomy.include_episodic` reads them; new source_types must teach `taxonomy/builder.py::_list_docs`.
+2. Taxonomy auto-assign hook in `IngestPipeline.ingest_document` ("5c" block) keeps running for every eligible ingest. New ingest features layer in BEFORE that block.
+3. `kg_taxonomy_{nodes,assignments,doc_meta}` migrations stay `CREATE TABLE IF NOT EXISTS` and backward-compatible.
+4. `Retriever.retrieve(query, user_id, top_k, source_types)` signature is locked. `TaxonomyRetriever` + `/recall` depend on passing `source_types`.
+5. `LLMProvider.complete(prompt, *, temperature, max_tokens)` must keep accepting explicit `max_tokens`. Taxonomy builder relies on this — Ollama silently truncates long JSON when default.
+6. `EmbeddingProvider.embed(texts)` returns L2-normalised vectors. `TaxonomyStore.beam_descend` treats cosine == dot product on the hot path.
+7. `progress(event, payload)` keeps emitting `taxonomy_descend` (with `describe_last_descend()` payload) whenever active retriever has `name=="taxonomy"`.
+8. `TaxonomyStore.clear(user_id)` is non-destructive to `kg_taxonomy_doc_meta` by default. Pass `wipe_doc_meta=True` for full reset (CLI `hrag taxonomy clear` does NOT).
 
-**Phase 6 contracts (must survive Phase 7):**
+**Phase 4 (9–11):**
+9. The four events `gate_check`, `clue_generate`, `dialog_compact`, `uncertain_render` must keep firing when their `compaction.*` flags are enabled. GUI Compaction expander subscribes.
+10. `render_uncertain` is idempotent — applying twice must not double-render.
+11. Silent `strip_uncertain` (when `mask_uncertain=False`) must keep running so raw `[UNCERTAIN]` never leaks to end users.
 
-12. The three Phase-6 progress events (`adaptive_top_k`, `retrieval_skipped`, `episodic_bias_applied`) must keep firing when `retrieval.adaptive_enabled` is true. The benchmark and any future GUI trace panel depend on the payload shape documented in `orchestrator.py`'s top-of-file event list.
-13. `_adaptive_top_k(cfg, intent)` must remain a pass-through when `retrieval.adaptive_enabled` is False — returning `(cfg.retrieval.top_k_vector, cfg.retrieval.top_k_final)` unconditionally. The default-off invariant (Phase 6 Q8) is load-bearing for everyone running an older `config.yaml`.
-14. `OllamaProvider._build_chat_kwargs` must keep emitting `keep_alive` as a top-level kwarg, not inside `options`. Burying it inside `options` is silently ignored by the Ollama server — the model will appear to unload normally after 5 minutes regardless of the config.
-15. The `Neo4jBackend` and `SqliteVecBackend` classes must keep their constructor side-effect-free (no driver / extension import at module load). Selecting a backend the user hasn't installed should fail at the first method call, not on `import hrag`.
+**Phase 6 (12–15):**
+12. The three events `adaptive_top_k`, `retrieval_skipped`, `episodic_bias_applied` must fire when `retrieval.adaptive_enabled` is true. Payload shapes documented in `orchestrator.py`'s top-of-file event list.
+13. `_adaptive_top_k(cfg, intent)` is a pass-through when `retrieval.adaptive_enabled` is False — returns `(cfg.retrieval.top_k_vector, cfg.retrieval.top_k_final)` unconditionally.
+14. `OllamaProvider._build_chat_kwargs` must keep emitting `keep_alive` as a TOP-LEVEL kwarg, NOT inside `options`. Burying it in `options` is silently ignored by Ollama.
+15. `Neo4jBackend` and `SqliteVecBackend` constructors are side-effect-free (no driver/extension import at module load). Missing-backend errors fire on first method call, not on `import hrag`.
 
-**Deferred (not in Phase 6):** cross-turn KV-cache reuse on Ollama (keep-alive keeps the model loaded; getting Ollama to recognise the shared prefix between turns needs research into `num_keep` / context-priming), retriever-level adaptation (Phase 6 only varies top_k, not retriever choice, by intent), self-improvement via the feedback table (Phase 5 collects 👍 / 👎; mining + fine-tuning is a future phase).
+**Phase 7-A (16–19):**
+16. `Retriever.retrieve(query, user_id, top_k, source_types, intent_hint, where)` — every retriever accepts `where`, even if ignoring it. Wrappers (`doc_scope`, `router`, `hybrid`) thread through.
+17. The three events `math_meta_filter`, `math_meta_filter_fallback`, `formula_extract` must fire when their flags are true.
+18. `scripts/backfill_has_math.py` is idempotent — running twice must not corrupt metadata.
+19. `_is_math_meta_query` is pure regex (no LLM) — runs on every turn when flag is on, must stay fast and deterministic.
 
-**Phase 7-A — Math handling: detector + filter + extraction** — **complete**, 755 passing tests, 5/5 acceptance benchmark.
+**Phase 6+7 wrap-up (20–24):**
+20. `cfg.retrieval.adaptive_retriever_per_intent` value is `"default"` or one of `{vector, bm25, hybrid, kg_ppr, community, router, taxonomy}`. Web API validates in POST; do not loosen.
+21. `feedback_summary(db)` return shape is stable: `{thumbs_up, thumbs_down, total, sessions, top_negative}` (also `rerank_fallback_count` from 9.9). CLI + `GET /api/feedback/stats` depend on it.
+22. `OllamaProvider._build_options` emits `num_keep` INSIDE `options` (NOT top-level via `_build_chat_kwargs`). Top-level is silently ignored.
+23. `hrag.ingest.nougat_loader` import is side-effect-free: zero `nougat`/`nougat_ocr` modules in `sys.modules` until a method is called.
+24. `EmbeddingsConfig.suggested_models` is advisory metadata only — `SentenceTransformersProvider` still accepts any HF model id.
 
-Triggered by a real user failure: HRAG retrieved three formula-free chunks for *"give me some formulas hipporag uses"* and reported "no formulas in the passages", despite 72 chunks in the live index containing Unicode math glyphs. Three Explore agents diagnosed every link in the retrieval chain (ingest, embed, query, rerank, answer) as math-blind. Phase 7-A ships three complementary fixes that all land together.
+**Phase 8 (25–32):**
+25. `cfg.interaction.review_enabled=False` (default) is a true no-op: zero new SSE events, LLM calls, DB writes. 829 pre-Phase-8 tests stay byte-identical pass.
+26. `InteractionStore` TTL cleanup runs on a daemon thread, never blocks the orchestrator. `store.shutdown()` is called from `Orchestrator.close()`; double-shutdown must not raise.
+27. The five public SSE event types — `review_required`, `review_resolved`, `followups`, `review_warning`, plus `turn_id` on `start` — are contract. Renaming breaks the frontend.
+28. `POST /api/chat/turns/{id}/resume` is idempotent on any action — retry returns `{"accepted": false, "reason": "turn_not_found_or_already_decided"}`; do not raise 4xx/5xx for retry.
+29. `messages.metadata` is JSON-encoded TEXT. Readers tolerate `NULL` and malformed JSON without raising. Column stays optional.
+30. `should_pause()` is pure (no LLM, no DB, no progress callback). Non-determinism here would make pause untestable.
+31. SSE relay routes `review_required` / `review_resolved` / `followups` as DEDICATED SSE event types (`event: review_required`), not nested under `event: progress`.
+32. `orchestrator.chat()` emits `turn_id` on the `start` event payload. Without it the frontend can't POST resume.
 
-**Phase 7-A modules:**
-- **Method 1 (Unicode-glyph `has_math` detector + backfill)** — `src/hrag/ingest/math_detect.py` adds `has_unicode_math(text, min_signals=2)`. Signals: Greek/mathematical-italic letters (`α β γ δ ε θ λ μ ν π ρ σ τ φ χ ψ ω Γ Δ Θ Λ Π Σ Φ Ψ Ω ∂ ∇` + `U+1D400..U+1D7FF`), math operators (`∑ ∫ ∏ √ ∞ ≤ ≥ ≠ ≈ ⟨ ⟩ ⊕ ⊗ ⋅`), sub/superscripts, equation density (2+ `=` in 200 chars), function-of-variable patterns. At least 2 must hit. `has_math = _has_latex_math(text) or has_unicode_math(text)`. The chunker already calls `has_math` on raw text, so no chunker change. One-shot backfill at `scripts/backfill_has_math.py` walks SQLite + ChromaDB (256-id batches, idempotent); tagged **63 of 1082 chunks** in the live corpus. 7 tests in `tests/test_math_detect_unicode.py`.
-- **Method 2 (math-meta query expansion)** — `src/hrag/retrieval/query_rewriter.py` adds `_RE_MATH_META` + `_expand_math_meta(query)` that appends `"equation parameter θ Θ loss function objective gradient ∑ ∫ derivation variable"` to meta-queries. Called inside `HeuristicRewriter.rewrite` after follow-up rewriting. `prompts/query_rewrite.md` gets an LLM-path rule + worked example. Cosine similarity between a meta-query and a chunk like `𝑌= Θ(𝑞|𝜃)` jumps from ~0.10 to ~0.35. 8 tests in `tests/test_math_meta_rewrite.py`.
-- **Method 3 (orchestrator filter + formula-extraction pass)** — `src/hrag/orchestrator.py::_is_math_meta_query` detects content-type queries; when `retrieval.math_meta_filter_enabled=true` AND the query matches, passes `where={"has_math": True}` into `retriever.retrieve(...)` AND lowers the rerank threshold to `retrieval.math_meta_rerank_threshold` (default `-10.0`). Empty-result fallback retries unfiltered. When `formula_extraction.enabled=true` AND results exist, a second LLM call against `prompts/extract_formulas.md` extracts every equation verbatim and the result is appended as `**Extracted formulas:**` to the answer. Three new progress events: `math_meta_filter`, `math_meta_filter_fallback`, `formula_extract`. 10 tests in `tests/test_math_meta_orchestrator.py`.
-- **Retriever Protocol widened** — `src/hrag/retrieval/base.py` adds `where: Optional[dict] = None`. Vector-backed retrievers (`vector`, `hybrid`, `router`, `taxonomy`, `doc_scope`) thread it through to `VectorStore.query`. `bm25`, `kg_ppr`, `community` accept and silently ignore (documented). Test doubles in 6 test files were widened to accept the kwarg.
+**Phase 8.1 (33):**
+33. `cfg.retrieval.always_include_episodic=True` (default) includes episodic for ALL intents, not only PERSONAL. PERSONAL stable-sort preserved on top. False reverts to per-intent strictness. Both "full" and "episodic" branches in `Orchestrator.chat()` honour it; surfaced via GET/POST `/api/config`.
 
-**Phase 7-A contracts (must survive Phase 7-B / 7-C):**
+**Phase 9.14 (34–37):**
+34. `cfg.ingest.contextual_retrieval_enabled=False` (default) is a true no-op: zero new LLM calls, SQL queries, prompts loaded; `ContextualAugmenter` not even instantiated.
+35. `ContextualAugmenter.augment_chunks` mutates ONLY `chunk.embedding_text`. `chunk.text` is read-only inside the augmenter — KG triples, taxonomy auto-assign, and answer prompt all consume `chunk.text`; contextual prefix must never leak (Phase-3 contract 1 preserved).
+36. Cache `ingest_context_cache` keyed by `sha256(chunk_text||doc_hash||model_name)`. Re-ingesting unchanged doc under same LLM model MUST be free. Changing the LLM model invalidates cleanly.
+37. Episodic memories (`doc.source_type=="episodic"`) are skipped by the augmenter. Check happens before instantiation.
 
-16. `Retriever.retrieve(query, user_id, top_k, source_types, intent_hint, where)` — every concrete retriever must accept the `where` kwarg, even if it ignores it. Wrappers (`doc_scope`, `router`, `hybrid`) must keep threading it through. Phase 7-A Q4 depends on this.
-17. The three Phase-7-A progress events must keep firing when `retrieval.math_meta_filter_enabled` / `formula_extraction.enabled` are true. The benchmark and any future GUI trace panel will subscribe.
-18. `scripts/backfill_has_math.py` must remain idempotent — running it twice on the same DB MUST NOT corrupt metadata. Anyone re-ingesting a single document and then re-running the backfill should converge.
-19. `_is_math_meta_query` must remain a pure regex pass (no LLM) so it stays fast and deterministic. The orchestrator runs it on every turn when the flag is on.
+**Phase 9 (38–44):**
+38. `cfg.compaction.combined_preflight_enabled=True` requires all of `gate_enabled`/`clue_enabled`/`intent.enabled` also True; constructor refuses to build `CombinedPreflight` otherwise (orchestrator silently falls back). Preserves per-stage event invariant.
+39. When `combined_preflight_enabled=True`, orchestrator MUST still emit `intent_check`, `gate_check`, `clue_generate`. Payloads carry `source="combined"`; shapes otherwise unchanged.
+40. `rerank_fallback_events` is append-only. Wrap inserts in `try/except` so a tight DB lock cannot regress the chat path.
+41. `messages.metadata.latency.first_token_ms` is the agreed key path. The latency harness reads it; renaming breaks the harness.
+42. `extract_uncertain_spans(answer, max_chars_per_span)` is pure. Self-RAG pass runs it on raw answer BEFORE `render_uncertain`/`strip_uncertain`.
+43. Phase 9 events `combined_preflight`, `async_preflight`, `context_compress`, `crag_reroute`, `self_rag`, `feedback_rerank_applied`, `rerank_fallback_logged` are contract (whichever subset their flags activate).
+44. Every Phase 9 flag defaults OFF (or to a value byte-identical to pre-Phase-9). Exceptions (intentional defaults-ON, pure-speed): `embeddings.query_cache_enabled` (9.3), `llm.warmup_on_init` (9.4), `retrieval.router_short_circuit` (9.11), `kg.dedup_enabled` (9.12).
 
-**Deferred (not in Phase 7-A):** math-aware embedding model swap (Method 4 — replace `all-mpnet-base-v2` with `allenai/specter2` or `jina-embeddings-v2`, requires full re-embedding), Nougat PDF→LaTeX re-ingest (Method 5 — 800MB model, GPU, full re-ingest, ~85% formula fidelity), plus everything previously deferred from Phase 6. → **All five landed in the Phase 6 + 7 wrap-up below.**
-
-**Phase 6 + 7 wrap-up — five deferred items completed** — **complete**, 797 passing tests, 19/19 acceptance (8/8 Phase 6 + 5/5 Phase 7-A + 6/6 new).
-
-Five parallel implementation agents shipped the deferred items in one wave, then two more wired them into the web GUI:
-
-- **6-B1 — Per-intent retriever override** — new `cfg.retrieval.adaptive_retriever_per_intent` (5 intents → retriever name or `"default"`). `Orchestrator._pick_retriever_for_intent` resolves and caches alternative retrievers; missing-dep cases silently fall back to the global with a logger warning. New event `adaptive_retriever_picked` (payload `{intent, retriever, global}`). 8 tests in `tests/test_per_intent_retriever.py`.
-- **6-B2 — Feedback analytics CLI + API** — new pure-SQL helper `src/hrag/feedback_stats.py::feedback_summary(db)` shared by CLI and web. CLI: `hrag feedback-stats` + `hrag feedback-export --rating up|down --out pairs.jsonl`. API: `GET /api/feedback/stats`. GUI: new Feedback drawer alongside Memories / Documents with ratio bar + top-negatives list. 8 tests.
-- **6-B3 — Ollama `num_keep` plumbing** — new `cfg.llm.num_keep: Optional[int]`. Threads into `options.num_keep` on chat() (NOT the top level — Ollama would silently ignore that placement). Default `None`. Best-effort cross-turn KV-cache priming. 5 tests in `tests/test_num_keep.py`.
-- **7-B — Math-aware embedder selector** — curated `EmbeddingsConfig.suggested_models` list (4 entries: all-mpnet, specter2, jina-v2, bge-small). Pure helper `dimension_for_model()` for client-side dim validation. CLI: `hrag embeddings-list` + `hrag embeddings-current`. API: `GET /api/embeddings/suggested`. GUI: dropdown with "requires re-ingest" warning. 4 tests in `tests/test_embeddings_selector.py`.
-- **7-C — Nougat PDF loader scaffold** — new `src/hrag/ingest/nougat_loader.py` with deferred imports (zero side effects on `import hrag`). `_load_pdf` dispatches to Nougat when `cfg.ingest.use_nougat=True` AND optional dep installed; silent PyMuPDF fallback otherwise. Optional `nougat` dep group in `pyproject.toml`. API: `GET /api/ingest/nougat_status`. GUI: toggle + availability badge. 5 tests.
-
-**Phase 6 + 7 wrap-up contracts (must survive Phase 8+):**
-
-20. `cfg.retrieval.adaptive_retriever_per_intent` value must always be either `"default"` or one of `{vector, bm25, hybrid, kg_ppr, community, router, taxonomy}`. The web API validates this in POST; do not loosen it.
-21. `feedback_summary(db)` must keep its return shape stable (`{thumbs_up, thumbs_down, total, sessions, top_negative}`) — both the CLI command and `GET /api/feedback/stats` depend on it.
-22. `OllamaProvider._build_options` must keep emitting `num_keep` inside `options` (NOT at the top level via `_build_chat_kwargs`). Putting it at the top level is silently ignored by the Ollama HTTP API.
-23. `hrag.ingest.nougat_loader` import must remain side-effect-free: zero `nougat` / `nougat_ocr` modules pulled into `sys.modules` until a method is actually called. The Phase 6+7 wrap-up Q5 test verifies this property.
-24. `EmbeddingsConfig.suggested_models` is purely advisory metadata — the SentenceTransformersProvider still accepts any HF model id. Adding or removing entries from the list does not break existing configs.
-
-**Phase 8.1 — memory recall fix:**
-
-33. `cfg.retrieval.always_include_episodic = True` (the new default) means episodic
-    memories are included in retrieval for ALL intents, not only PERSONAL. The
-    PERSONAL stable-sort that lifts episodic to top is preserved on top of this.
-    Setting it to False reverts to strict per-intent source_types (the pre-Phase-8.1
-    behaviour) — useful for users with massive corpora where memories should never
-    compete with documents. Both the "full" and "episodic" branches in
-    `Orchestrator.chat()` honour the flag; the GET/POST `/api/config` endpoints
-    surface it under `retrieval.always_include_episodic`.
-
-**Deferred to Phase 8+ (still deferred, requires real usage / infra):** actually running Nougat over a corpus (scaffold present, model download is opt-in), actually swapping to a math-aware embedder + re-ingest (selector present, user controls when), feedback-loop fine-tuning (analytics now expose data, but training infra is a Phase 8 lift), cross-turn KV-cache reuse via Ollama prefix tokens (research-heavy beyond `num_keep`).
-
-**Phase 8 — Interactive retrieval review loop** — **complete**, 897 passing tests, 5/5 acceptance benchmark.
-
-Triggered by a user transcript: "I want to see the stars and the moon and all in between" — HRAG retrieved 6 off-corpus chunks (StarCoder/T5-Large/FAISS by lexical match on "stars"), reasoned across them, then politely reported "no information about the moon." The system paid for retrieval + reasoning + apology when the cheap signal (every rerank score deep in the negative) already proved the question was off-corpus. The user had no chance to redirect mid-turn.
-
-Phase 8 inserts a pause between retrieval and answer generation. The orchestrator emits a `review_required` SSE event with the candidate sources, the system's clue (hypothesis), the taxonomy descend trace, and 0-3 alternative phrasings; the frontend renders a modal; the user POSTs a decision to `/api/chat/turns/{id}/resume` which unblocks the orchestrator thread. All thirteen sub-features (A-M) ship in one phase, gated by one config block (`interaction.review_enabled`, default OFF).
-
-**Phase 8 modules:**
-- `src/hrag/interaction/store.py` — `InteractionStore` (in-memory dict of `PendingTurn` keyed by turn_id, daemon reaper thread with TTL = `cfg.interaction.review_timeout_s + 30s`, `submit_decision()` idempotent, `wait_for_decision(timeout)` blocks on `threading.Event`).
-- `src/hrag/interaction/review.py` — `should_pause()` evaluates 7 trigger heuristics (score_floor, ambiguity_delta, branch_threshold, intent_unclear, router_ambiguous, factual_general_swap, always_mode); `build_review_payload()` snapshots up to 240 chars per source; `generate_rephrasings()` runs one LLM pass against `prompts/rephrase.md`; `maybe_pause()` orchestrates the full flow with default-off short-circuit.
-- `src/hrag/config.py::InteractionConfig` — 13 fields (enabled, mode, score_floor=-3.0, ambiguity_delta=0.4, branch_threshold=2, timeout_s=300, rephrasings_enabled, followups_enabled, persistence_enabled, why_source_enabled, clarify_enabled, expand_doc_enabled).
-- `src/hrag/db/schema.sql` + `db/migrations.py` — new `messages.metadata TEXT` (JSON, nullable) column via idempotent ALTER TABLE migration.
-- `src/hrag/orchestrator.py` — `Orchestrator.__init__` owns a long-lived `InteractionStore`; `chat()` allocates `turn_id` on the `start` event and emits it; pause hook between `organize_done` and prompt rendering; action dispatcher handles `continue/filter/rephrase/general/clarify/expand_doc/redescend/abort` + episodic toggle; FACTUAL→GENERAL silent swap branch now gated on `review_decision.action == "continue"`; follow-ups generation between `generate` and `done`; decision metadata persisted to `messages.metadata` JSON.
-- `src/hrag/web/app.py` — `POST /api/chat/turns/{id}/resume` (pydantic `Literal` action validation, idempotent on `accepted=False`); `POST /api/chat/turns/{id}/why_source` (lazy per-source explanation, gated by `cfg.interaction.why_source_enabled`); SSE `_stream()` relays `review_required`, `review_resolved`, `followups` as dedicated event types.
-- `src/hrag/web/static/index.html` — `#review-modal-scrim` + `#review-modal` with reasons row, editable clue textarea, rephrasing chips, taxonomy breadcrumbs, per-source rows with checkbox + "Why this?" + "More like this", footer with `Continue / Ask me to clarify / Answer from general / Cancel`, keyboard-shortcut hint line.
-- `src/hrag/web/static/app.js` — `handleReviewRequired(payload)`, `submitReviewDecision(partial)` (auto-promotes `continue` to `filter` when sources are unchecked, to `general` when all unchecked, to `rephrase` when the clue was edited), `fetchWhySource()`, `renderFollowups()`, keyboard handler (`Enter` continue, `Esc` abort, `1-9` toggle source, `E` edit clue, `R` cycle rephrase chip, `G` general, `C` clarify).
-- `src/hrag/web/static/styles.css` — `.review-modal*` classes mirroring the Smart Remember modal Z-stack (scrim=80, modal=81). The critical `.review-modal[hidden] { display: none !important; }` guard prevents the modal leaking when `display: flex` would otherwise win.
-- `src/hrag/prompts/{rephrase,clarify,followups,why_source}.md` — 4 new prompt templates.
-
-**Phase 8 contracts (must survive Phase 9+):**
-
-25. `cfg.interaction.review_enabled = False` (the default) must be a true no-op: zero new SSE events, zero new LLM calls, zero new DB writes. The 829 pre-Phase-8 tests stay byte-identical pass.
-26. `InteractionStore` TTL cleanup must run on a daemon thread and never block the orchestrator. `store.shutdown()` is called from `Orchestrator.close()`; calling shutdown twice must not raise.
-27. The five public SSE event types from Phase 8 — `review_required`, `review_resolved`, `followups`, `review_warning`, plus `turn_id` riding on the existing `start` event — are part of the contract. Renaming any of them breaks the frontend.
-28. `POST /api/chat/turns/{id}/resume` MUST be idempotent on any action: a network retry returning `{"accepted": false, "reason": "turn_not_found_or_already_decided"}` is the correct shape; do not raise 4xx/5xx for the retry case.
-29. `messages.metadata` is JSON-encoded text; readers MUST tolerate `NULL` and malformed JSON without raising. The column stays optional — pre-Phase-8 reads (`r["content"]`, `r["role"]`) keep working.
-30. `should_pause()` must remain a pure function (no LLM, no DB, no progress callback). The orchestrator runs it on every FACTUAL turn when `review_enabled=true`; non-determinism here would make the pause behaviour untestable.
-31. The SSE relay must keep routing `review_required` / `review_resolved` / `followups` as DEDICATED SSE event types (i.e. `event: review_required`), not nested under `event: progress`. The frontend dispatcher reads the SSE event name directly for these.
-32. `orchestrator.chat()` MUST emit `turn_id` on the `start` event payload. Without it, the frontend cannot POST to `/api/chat/turns/{id}/resume`.
-
-**Deferred (not in Phase 8):** cross-session policy learning (`remember_choice=true` writes the policy to `messages.metadata` but Phase 8 doesn't read it back to pre-fill the modal — future phase indexes past decisions); streaming KV-cache pre-warm during the pause (cheap; ship if `click → first token` latency > 800 ms); mobile bottom-sheet variant of the modal (current centred dialog works at any width); voice / hands-free path; surfacing the `interaction` block in `GET /api/config` (currently env-var + config.yaml only). → All deferred to Phase 8.1+ or a future phase.
-
-## Phase 4 / 5 must preserve
-
-When implementing later phases, do NOT break the following Phase-3 contracts. Each is load-bearing for the memory or taxonomy layer.
-
-1. `documents.source_type` and `chunks.source_type` ('document' | 'episodic') must stay. `taxonomy.include_episodic` reads them; if you add a new source_type, teach the taxonomy builder to handle it (`src/hrag/taxonomy/builder.py::_list_docs`).
-2. The taxonomy auto-assign hook in `IngestPipeline.ingest_document` (the "5c" block) must keep running for every eligible ingest. New ingest features (e.g. equation-aware chunker) layer in **before** that block; they do not skip it.
-3. `kg_taxonomy_nodes` / `kg_taxonomy_assignments` / `kg_taxonomy_doc_meta` migrations stay `CREATE TABLE IF NOT EXISTS` and backward-compatible. Never drop a column the builder reads.
-4. `Retriever.retrieve(query, user_id, top_k, source_types)` signature is locked. `TaxonomyRetriever` and the `/recall` path depend on `source_types` being passable through; do not strip it when wrapping.
-5. `LLMProvider.complete(prompt, *, temperature, max_tokens)` must keep accepting an explicit `max_tokens`. The taxonomy builder relies on this — Ollama silently truncates long JSON when `max_tokens` is left to its default; don't reintroduce that bug by removing the keyword.
-6. `EmbeddingProvider.embed(texts)` must keep returning L2-normalised vectors. `TaxonomyStore.beam_descend` treats cosine == dot product on the hot path.
-7. The orchestrator's `progress(event, payload)` channel must keep emitting `taxonomy_descend` (with the `describe_last_descend()` payload) whenever the active retriever has `name == "taxonomy"`. The Chat page's **🌳 Tree navigation** expander and the Taxonomy page both subscribe; silently dropping the event regresses the visual.
-8. `TaxonomyStore.clear(user_id)` is **non-destructive** to `kg_taxonomy_doc_meta` by default. Tree rebuilds rely on the summary + centroid cache surviving the wipe. Pass `wipe_doc_meta=True` only when you mean a full reset (the `hrag taxonomy clear` CLI does NOT pass it — it preserves the cache).
-
-**Phase 4 contracts (must survive Phase 5):**
-
-9. The four progress events `gate_check`, `clue_generate`, `dialog_compact`, `uncertain_render` must keep firing when their respective `compaction.*` flags are enabled. The GUI's Compaction expander subscribes to all four; silently dropping any event regresses the visual.
-10. `render_uncertain` must remain idempotent — applying it twice to the same answer must not double-render or corrupt the output.
-11. The orchestrator's silent `strip_uncertain` path (when `mask_uncertain=False`) must continue running so raw `[UNCERTAIN]` tokens never leak to end users regardless of the flag state.
-
-## Phase 2 acceptance — manual trigger
+## Manual triggers
 
 ```bash
-# 1. Flip the toggles (or set HRAG_KG__ENABLED=true HRAG_RETRIEVAL__RETRIEVER=router)
-#    in config.yaml: kg.enabled: true  AND  retrieval.retriever: router
-# 2. Wipe the index and re-ingest (chunks + KG + communities all rebuilt)
+# Phase 2 (KG router) — wipe + re-ingest:
+#   in config.yaml: kg.enabled: true  AND  retrieval.retriever: router
 rm -rf data/store.sqlite data/chroma data/kg
 hrag init
 hrag ingest "D:/Selected Dynamic Papers" --recursive
-# 3. Re-run the Phase 1 benchmark using the project's benchmark skill — q4 should PASS
-# 4. Or, if chunks already exist and you only want to (re)build the KG layer:
+# Or, if chunks exist and you only want the KG layer:
 hrag rebuild-kg
-```
 
-## Phase 3 (Taxonomy) — manual trigger
+# Phase 3 — taxonomy
+hrag taxonomy build              # parallel summaries → LLM tree → materialize
+hrag taxonomy show               # text outline
+hrag taxonomy clear              # drop tree (preserves doc-meta cache)
 
-```bash
-# Ensure taxonomy.enabled: true and retrieval.retriever: taxonomy in config.yaml
-# (both are defaults). Then build the tree from the current corpus:
-hrag taxonomy build              # parallel summaries → LLM tree proposal → materialize
-hrag taxonomy show               # print the tree as a text outline
-hrag taxonomy clear              # drop the tree (preserves the doc-meta cache)
-
-# New documents ingested via `hrag ingest` are auto-filed under the tree
-# via DocAssigner. Edit the tree from the GUI: `hrag gui` → 🌳 Taxonomy page.
-```
-
-## Phase 4 (Compaction & Gating) — manual trigger
-
-```bash
-# Ensure the Phase 2/3 corpus is already ingested.
-# Enable all four flags via environment variables (or edit config.yaml's
-# compaction: block):
-HRAG_COMPACTION__GATE_ENABLED=true \
-HRAG_COMPACTION__CLUE_ENABLED=true \
-HRAG_COMPACTION__DIALOG_MST_ENABLED=true \
-HRAG_COMPACTION__MASK_UNCERTAIN=true \
+# Phase 4 — compaction (enable per-session or via env):
+HRAG_COMPACTION__GATE_ENABLED=true HRAG_COMPACTION__CLUE_ENABLED=true \
+HRAG_COMPACTION__DIALOG_MST_ENABLED=true HRAG_COMPACTION__MASK_UNCERTAIN=true \
 python tests/benchmark/run_phase4.py
-
-# Or toggle per-session via CLI flags (each flag is independent):
+# Or CLI flags:
 hrag chat --gate --clue --mask-uncertain
-hrag chat --no-gate --clue            # clue only
-hrag chat --gate --no-clue            # gate only
 ```
 
-Acceptance: >= 3/4 acceptance questions pass.
+Acceptance: ≥3/4 questions pass for Phase 4.
 
 ## Commands
 
@@ -275,122 +198,114 @@ Acceptance: >= 3/4 acceptance questions pass.
 # Install (editable)
 python -m pip install -e .[dev]
 
-# Initialize SQLite + chroma directories
+# Init SQLite + chroma
 hrag init
 
-# Ingest documents
+# Ingest
 hrag ingest <path>              # single file
 hrag ingest <dir> --recursive   # whole tree
 
-# Chat REPL (slash commands: /help, /sources, /status, /exit,
-# /remember, /recall, /forget, /profile)
+# Chat (slash: /help /sources /status /exit /remember /recall /forget /profile)
 hrag chat
 hrag chat --fast                            # top_k=4, no rerank
-hrag chat --retriever taxonomy              # default; or vector / bm25 / hybrid / kg_ppr / community / router
+hrag chat --retriever taxonomy              # default; or vector/bm25/hybrid/kg_ppr/community/router
 hrag chat --no-rerank
 
-# Phase 3 — taxonomy (LLM-proposed category tree over docs + memories)
-hrag taxonomy build                         # build/rebuild the tree
-hrag taxonomy show                          # print the tree as a text outline
-hrag taxonomy clear                         # drop the tree (preserves doc-meta cache)
+# Memory
+hrag remember "<text>"                      # save episodic inline
+hrag remember <path>                        # bulk-import .md/.txt
+hrag memory list
+hrag memory extract --session <id>          # mine preferences
 
-# Phase 3 — memory
-hrag remember "<text>"                      # save an episodic memory inline
-hrag remember <path>                        # bulk-import .md / .txt files
-hrag memory list                            # show recent episodic memories
-hrag memory extract --session <id>          # mine preferences from a session
-
-# Streamlit GUI (dashboard with Chat · Memories · 🌳 Taxonomy · ...)
+# Streamlit GUI
 hrag gui
 
 # Other
 hrag list-docs
 
-# Tests
-pytest -q                                   # all tests
-pytest tests/test_orchestrator.py -q        # one file
-pytest -k "rerank" -q                       # by name pattern
-
-# Lint
+# Tests / lint
+pytest -q
+pytest tests/test_orchestrator.py -q
+pytest -k "rerank" -q
 ruff check src tests
 ```
 
-Heavy-deps tests (chromadb / sentence-transformers / ollama) skip cleanly when those deps are absent — `tests/conftest.py` provides stubs so lightweight tests run anywhere.
+Heavy-deps tests (chromadb / sentence-transformers / ollama) skip cleanly when those deps are absent — `tests/conftest.py` provides stubs.
 
 ## Configuration
 
-`config.yaml` at the repo root is the canonical config; values are loaded into pydantic models in `src/hrag/config.py`. Two override mechanisms:
+`config.yaml` is canonical; loaded into pydantic models in `src/hrag/config.py`. Overrides:
 
-1. **Environment variables** prefixed `HRAG_` with `__` as the section separator: `HRAG_LLM__MODEL=gemma:7b` overrides `llm.model`.
-2. **Per-session CLI flags** on `hrag chat` (`--retriever`, `--reranker`, `--no-rerank`, `--fast`) override config for that REPL only.
+1. **Env vars** prefixed `HRAG_` with `__` as section separator: `HRAG_LLM__MODEL=gemma:7b` overrides `llm.model`.
+2. **Per-session CLI flags** on `hrag chat` (`--retriever`, `--reranker`, `--no-rerank`, `--fast`).
 
 `Config.resolve(relative_path)` resolves storage paths against `project_root` (cwd at load time).
 
 ## Architecture
 
-Modular stack — CLI · GUI · Orchestrator · Retrievers · Personalization · Storage · Providers. Every layer is one small Python module behind an interface so layers can be swapped (e.g. ChromaDB → sqlite-vec, NetworkX → Neo4j). The architecture diagram in README.md is the canonical map.
+Modular stack — CLI · GUI · Orchestrator · Retrievers · Personalization · Storage · Providers. Every layer behind an interface so it can be swapped (Chroma↔sqlite-vec, NetworkX↔Neo4j). README.md has the diagram.
 
-### Pipeline (orchestrator.py)
+### Pipeline (`orchestrator.py`)
 
-`Orchestrator.chat(question, user_id, session_id, progress, stream)` runs:
+`Orchestrator.chat(question, user_id, session_id, progress, stream)`:
 1. Ensure user; create session row if `session_id is None`.
-2. Persist the user message; load up to 10 prior messages via `_load_history` (excludes the message just inserted).
-3. `retriever.retrieve(question, user_id, top_k=cfg.retrieval.top_k_vector)` — returns `list[RetrievalResult]`.
-4. If reranker is set: rerank with `cfg.retrieval.rerank_threshold`, capped at `cfg.retrieval.top_k_final`. **Critical fallback**: if rerank drops everything, fall back to unreranked top-k (otherwise the LLM answers "I couldn't find that" even when retrieval succeeded). Emits `fallback_used: True` in the `rerank_done` progress event.
+2. Persist user message; load up to 10 prior messages via `_load_history` (excludes the message just inserted).
+3. `retriever.retrieve(question, user_id, top_k=cfg.retrieval.top_k_vector)` → `list[RetrievalResult]`.
+4. If reranker is set: rerank with `cfg.retrieval.rerank_threshold`, cap at `top_k_final`. **Critical fallback**: if rerank drops everything, fall back to unreranked top-k (else LLM answers "I couldn't find that" even when retrieval succeeded). Emits `fallback_used: True` in `rerank_done`.
 5. Render `prompts/answer.md` (RAFT-style `##begin_quote##` CoT) with `{user_profile, conversation_history, retrieved_passages, question}`.
-6. `llm.generate_stream` (when `stream=True`) or `llm.complete` (one-shot).
-7. Persist assistant message and commit.
+6. `llm.generate_stream` (stream=True) or `llm.complete`.
+7. Persist assistant message + commit.
 
-`progress` is an optional `Callable[[str, dict], None]` — events documented at the top of `orchestrator.py`. The CLI uses this for the live Rich progress display.
+`progress` is `Optional[Callable[[str, dict], None]]` — events at top of `orchestrator.py`. CLI uses it for live Rich display.
 
-### Pluggable layers (factory pattern)
+### Pluggable layers (factories)
 
 | Layer | Factory | Implementations |
 |---|---|---|
-| LLM | `providers/llm.py::get_llm_provider` | `OllamaProvider`, `OpenAIProvider`, `AnthropicProvider` |
+| LLM | `providers/llm.py::get_llm_provider` | Ollama, OpenAI, Anthropic |
 | Embeddings | `providers/embeddings.py::get_embedding_provider` | sentence-transformers, OpenAI |
-| Retriever | `retrieval/factory.py::build_retriever` | `VectorRetriever`, `BM25Retriever`, `HybridRetriever` (RRF), `KGPPRRetriever`, `CommunityRetriever`, `QueryRouter`, `TaxonomyRetriever` (default) |
-| Reranker | `retrieval/factory.py::build_reranker` | `CrossEncoderReranker` (default), `LLMReranker` (per-chunk 0–3), `BatchedLLMReranker` (single LLM call) |
+| Retriever | `retrieval/factory.py::build_retriever` | Vector, BM25, Hybrid (RRF), KGPPR, Community, QueryRouter, Taxonomy (default) |
+| Reranker | `retrieval/factory.py::build_reranker` | CrossEncoder (default), LLMReranker (per-chunk 0–3), BatchedLLMReranker |
 
-Reranker threshold semantics differ by reranker: `cross_encoder` is a logit (default `-5.0`, permissive), `llm`/`batched_llm` is an int 0–3 (use `2` if switching).
+Reranker thresholds differ: `cross_encoder` is a logit (default `-5.0`, permissive); `llm`/`batched_llm` is int 0–3 (use `2` if switching).
 
-### HeteRAG dual-text on Chunk
+### HeteRAG dual-text
 
 `types.Chunk` has two text fields:
-- `embedding_text` — title/section prepended (HeteRAG metadata fusion); what the embedder sees.
-- `text` — raw chunk; what the LLM sees at generation time.
+- `embedding_text` — title/section prepended (HeteRAG fusion); embedder sees this.
+- `text` — raw chunk; LLM sees this at generation.
 
-Anything that embeds a chunk must use `embedding_text`. Anything that shows or feeds it to the LLM uses `text`. Don't conflate.
+Anything embedding a chunk uses `embedding_text`. Anything showing or LLM-feeding uses `text`. Don't conflate.
 
 ### Storage
 
-- **SQLite** (`db/schema.sql`, `db/connection.py`): users, documents, chunks, sessions, messages, `preferences` (Phase 3 memory), `kg_nodes`, `kg_edges`, `kg_communities`, `kg_triple_cache` (Phase 2), `kg_taxonomy_nodes`, `kg_taxonomy_assignments`, `kg_taxonomy_doc_meta` (Phase 3 taxonomy). Foreign key column on `chunks` is `doc_id` (not `document_id`).
-- **ChromaDB** (`retrieval/vector.py::VectorStore`): vectors only; metadata mirror of chunk fields lives here too. Community summaries (Phase 2) live in the `hrag_community_summaries` collection alongside.
-- **NetworkX** (Phase 2): MultiDiGraph holding phrase + passage nodes; mirrored in SQLite.
+- **SQLite** (`db/schema.sql`, `db/connection.py`): users, documents, chunks, sessions, messages, `preferences`, `kg_{nodes,edges,communities,triple_cache}`, `kg_taxonomy_{nodes,assignments,doc_meta}`, `jobs`, `feedback`, `kg_canonical_triples`, `rerank_fallback_events`, `ingest_context_cache`. FK on `chunks` is `doc_id` (not `document_id`).
+- **ChromaDB** (`retrieval/vector.py::VectorStore`): vectors + metadata mirror. Community summaries live in `hrag_community_summaries`.
+- **NetworkX**: MultiDiGraph (phrase + passage nodes); mirrored in SQLite.
 
-`user_id` is plumbed through every table and every API even in single-user mode — don't strip it when adding features.
+`user_id` is plumbed through every table and every API even in single-user mode — don't strip it.
 
 ### Ingest pipeline (`ingest/pipeline.py`)
 
-`load_document` (`loaders.py`: PDF via PyMuPDF, DOCX via python-docx, MD via markdown-it-py, plain text) → `chunk_document` (token-budgeted, structure-aware; HeteRAG fusion happens here) → `filter_chunks` (`quality.py`) → embed in batches of 32 → upsert into SQLite and ChromaDB (`delete_doc` then `add_chunks` so reingest is idempotent).
+`load_document` (PyMuPDF / python-docx / markdown-it-py / plain text) → `chunk_document` (token-budgeted, structure-aware; HeteRAG fusion) → `filter_chunks` (`quality.py`) → embed in batches of 32 → upsert into SQLite + ChromaDB (`delete_doc` then `add_chunks` so reingest is idempotent).
 
 ### Chunk quality filter (`ingest/quality.py`)
 
-Runs at ingest time, drops typically 70–85% of chunks on academic PDFs. Configured under `chunking.quality.*`. Pure-function module — no I/O. **Important**: each filter check matches the *entire* chunk against a pattern. A chunk that *starts* with `"250\n6We use..."` (page number followed by content) does NOT match `_RE_PAGE_ARTIFACT` because the regex requires the whole text to be a page number. If you're seeing artifacts in retrieval, the filter probably isn't broken — the PDF parser is gluing artifacts onto real content, and tightening the filter alone won't fix it.
+Drops typically 70–85% of chunks on academic PDFs. Configured under `chunking.quality.*`. Pure-function module — no I/O. **Important**: each check matches the *entire* chunk against a pattern. A chunk that *starts* with `"250\n6We use..."` doesn't match `_RE_PAGE_ARTIFACT` because the regex requires the whole text to be a page number. If artifacts surface in retrieval, the PDF parser is gluing artifacts onto real content — tightening the filter alone won't fix it.
 
-After tweaking filter settings, **you must re-ingest** — the index doesn't update retroactively. Reingest deletes old chunks/vectors first.
+After tweaking filter settings, **re-ingest** — the index doesn't update retroactively. Reingest deletes old chunks/vectors first.
 
 ### Tests
 
-`tests/conftest.py` stubs out heavy deps (chromadb, sentence-transformers, ollama) so unit tests run in CI without them. Tests that genuinely need a heavy dep skip via `pytest.importorskip`. When adding a test that exercises a new external lib, follow the same pattern.
+`tests/conftest.py` stubs heavy deps (chromadb, sentence-transformers, ollama). Tests genuinely needing a heavy dep skip via `pytest.importorskip`. Follow the same pattern for new tests.
 
 ### Prompts
 
-All prompt templates live as `.md` files in `src/hrag/prompts/` and are loaded with `Path(__file__).parent / "prompts" / "<name>.md"` and `.format(...)`. The setuptools config in `pyproject.toml` packages them via `package-data`. Keep prompt edits in the `.md` file, not in Python string literals.
+Templates live as `.md` files in `src/hrag/prompts/`, loaded with `Path(__file__).parent / "prompts" / "<name>.md"` and `.format(...)`. `pyproject.toml` packages them via `package-data`. Edit the `.md` file, not Python string literals.
 
 ## Conventions
 
-- Type hints required (`from __future__ import annotations` everywhere); `pydantic` for config models, `dataclasses` for runtime value objects (`types.py`).
+- Type hints required (`from __future__ import annotations` everywhere); pydantic for config models, dataclasses for runtime value objects (`types.py`).
 - Heavy-dep imports go inside functions/methods, not at module top, so import-time failures don't cascade.
 - Provider/retriever/reranker classes carry a `name: str` class attribute for logging/UI.
 - Database access goes through `Database` (`db/connection.py`); use `with self.db.conn:` for transaction blocks. Always `self.db.commit()` at the end of a write path.

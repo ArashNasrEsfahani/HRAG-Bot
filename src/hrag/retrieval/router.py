@@ -9,7 +9,9 @@ fuses the result lists with Reciprocal Rank Fusion (RRF).
 Routes
 ------
 - entity          -> kg_ppr + bm25 + vector, fused via RRF
+                     (when short_circuit=True: kg_ppr only, or first available)
 - global          -> community (fall back to vector)
+                     (when short_circuit=True: community only, or first available)
 - cross_document  -> kg_ppr + bm25 + community + vector, fused via RRF
 - ambiguous       -> kg_ppr + bm25 + vector, fused via RRF
 
@@ -23,13 +25,41 @@ LLM call is small (~20 tokens, temperature=0.0) but adds one round-trip per
 unique question. To make it optional, factor a ``classify=`` argument into
 build_retriever / orchestrator that swaps in a NoopRouter (always returns
 "ambiguous") for benchmarking.
+
+Phase 9.11 — Speculative short-circuit
+---------------------------------------
+When ``short_circuit=True`` (passed by the factory when
+``cfg.retrieval.router_short_circuit`` is true, default ON), the router
+skips the multi-retriever RRF fusion for ``entity`` and ``global`` routes:
+
+  entity  -> kg_ppr only (falls back to bm25, then vector if absent)
+  global  -> community only (falls back to vector if absent)
+
+``cross_document`` and ``ambiguous`` always use the full RRF fan-out — those
+routes exist precisely to hedge across multiple sources.
+
+A ``router_short_circuit`` progress event is emitted (via the optional
+``progress`` callback) when short-circuiting fires:
+  payload: {"label": str, "retriever": str}
+
+NOTE: logprob-based confidence is not available from local Ollama models.
+The short-circuit fires unconditionally on the label for entity/global; the
+RRF fan-out was always a hedge for cross_document/ambiguous, not for these
+clearly-targeted routes. OpenAI/Anthropic providers that expose logprobs could
+plug in a confidence check in a future phase, but it is not needed here.
+
+Observable events emitted by router.py
+---------------------------------------
+  ``router_short_circuit`` — payload: {"label": str, "retriever": str}.
+    Fires when short_circuit=True AND the label is "entity" or "global".
+    Only emitted when a ``progress`` callback was passed at construction.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 from hrag.providers.llm import LLMProvider
 from hrag.retrieval.base import Retriever
@@ -136,6 +166,8 @@ class QueryRouter(Retriever):
         community_retriever: Optional[Retriever] = None,
         bm25_retriever: Optional[Retriever] = None,
         rrf_k: int = 60,
+        short_circuit: bool = False,
+        progress: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
         self._llm = llm
         self._vector = vector_retriever
@@ -143,6 +175,14 @@ class QueryRouter(Retriever):
         self._community = community_retriever
         self._bm25 = bm25_retriever
         self._rrf_k = rrf_k
+        # Phase 9.11: when True, skip multi-retriever RRF fusion for entity/global
+        # routes and call only the primary retriever for that label. Default False
+        # so direct construction in tests preserves the existing fusion behaviour;
+        # the factory passes cfg.retrieval.router_short_circuit (default True).
+        self._short_circuit = short_circuit
+        # Optional progress callback. Called with (event_name, payload_dict) when
+        # short-circuiting fires. Matches the orchestrator's progress signature.
+        self._progress = progress
 
         prompt_path = Path(__file__).parent.parent / "prompts" / "router.md"
         self._template = prompt_path.read_text(encoding="utf-8")
@@ -229,7 +269,29 @@ class QueryRouter(Retriever):
             label = self.classify(query)
 
         if label == "entity":
-            # updated for iter-3: entity route now RRF-fuses kg_ppr+bm25+vector
+            # Phase 9.11 — speculative short-circuit.
+            # When enabled, skip the multi-retriever RRF fusion and call ONLY
+            # the primary entity-route retriever (kg_ppr, or first available
+            # fallback). This is safe because entity queries are tightly scoped;
+            # the RRF fan-out was a hedge for cross_document/ambiguous, not for
+            # clearly-targeted entity lookups.
+            if self._short_circuit:
+                chosen = self._call_first_available(
+                    [self._kg_ppr, self._bm25, self._vector],
+                    query, user_id, top_k, source_types, intent_hint, where,
+                )
+                chosen_name = self._first_available_name(
+                    [self._kg_ppr, self._bm25, self._vector]
+                )
+                if self._progress is not None:
+                    self._progress(
+                        "router_short_circuit",
+                        {"label": label, "retriever": chosen_name},
+                    )
+                return chosen
+
+            # Full fusion path (short_circuit=False or cross_document/ambiguous).
+            # updated for iter-3: entity route RRF-fuses kg_ppr+bm25+vector
             # so exact technical phrases ("synonymy threshold", "0.05") are caught
             # by BM25 even when KG-PPR seeds weakly on multi-token terms.
             per_retriever = self._call_all(
@@ -245,6 +307,26 @@ class QueryRouter(Retriever):
             return _rrf_fuse(per_retriever, k=self._rrf_k, top_k=top_k)
 
         if label == "global":
+            # Phase 9.11 — speculative short-circuit.
+            # global queries target the community summary store; calling vector
+            # as a fallback is already in _call_first_available. No fusion needed.
+            if self._short_circuit:
+                chosen = self._call_first_available(
+                    [self._community, self._vector],
+                    query, user_id, top_k, source_types, intent_hint, where,
+                )
+                chosen_name = self._first_available_name(
+                    [self._community, self._vector]
+                )
+                if self._progress is not None:
+                    self._progress(
+                        "router_short_circuit",
+                        {"label": label, "retriever": chosen_name},
+                    )
+                return chosen
+
+            # Full path (short_circuit=False): same _call_first_available, but
+            # with no fusion anyway (global was always a single-retriever path).
             return self._call_first_available(
                 [self._community, self._vector],
                 query, user_id, top_k, source_types, intent_hint, where,
@@ -278,6 +360,18 @@ class QueryRouter(Retriever):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _first_available_name(retrievers: list[Optional[Retriever]]) -> str:
+        """Return the ``name`` attribute of the first non-None retriever.
+
+        Used by the short-circuit path to include the chosen retriever's name
+        in the ``router_short_circuit`` progress event payload.
+        """
+        for r in retrievers:
+            if r is not None:
+                return getattr(r, "name", r.__class__.__name__)
+        return "none"
 
     def _call_first_available(
         self,

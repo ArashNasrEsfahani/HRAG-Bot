@@ -66,6 +66,10 @@ neo4j = [
 nougat = [
     "nougat-ocr>=0.1",
 ]
+quantize = [
+    "optimum[onnxruntime]>=1.19",
+    "onnxruntime>=1.17",
+]
 
 [project.scripts]
 hrag = "hrag.cli:main"

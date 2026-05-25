@@ -24,6 +24,53 @@ _MIGRATIONS: tuple[str, ...] = (
     # UNIQUE because the upsert uses INSERT ... ON CONFLICT(user_id, topic, polarity).
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_preferences_user_topic_polarity "
     "ON preferences(user_id, topic, polarity)",
+
+    # Phase 9.12: cross-chunk triple deduplication index. Sibling table to
+    # kg_triple_cache (which is keyed on chunk text); this one is keyed on
+    # the canonical (subject|relation|object) triple itself. freq counts
+    # supporting chunks; the per-chunk passage->phrase edges still flow
+    # through kg_edges so Chroma + SQLite + NetworkX stay in sync.
+    "CREATE TABLE IF NOT EXISTS kg_canonical_triples ("
+    "    canonical_key       TEXT PRIMARY KEY,"
+    "    subject             TEXT NOT NULL,"
+    "    relation            TEXT NOT NULL,"
+    "    object              TEXT NOT NULL,"
+    "    first_seen_chunk_id TEXT NOT NULL,"
+    "    freq                INTEGER NOT NULL DEFAULT 1,"
+    "    created_at          TEXT NOT NULL DEFAULT (datetime('now'))"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_kg_canonical_triples_subject "
+    "ON kg_canonical_triples(subject)",
+
+    # Phase 9.14: Contextual Retrieval (Anthropic technique). Per-chunk
+    # cache for the LLM-generated "context line" that gets prepended to
+    # chunk.embedding_text at ingest. Keyed by SHA-256 over
+    # (chunk_text, doc_hash, model_name) so a re-ingest of the same doc
+    # under the same model reuses the cache; changing the model invalidates
+    # transparently. Independent of kg_triple_cache.
+    "CREATE TABLE IF NOT EXISTS ingest_context_cache ("
+    "    cache_key       TEXT PRIMARY KEY,"
+    "    model_name      TEXT NOT NULL,"
+    "    context_line    TEXT NOT NULL,"
+    "    created_at      TEXT NOT NULL DEFAULT (datetime('now'))"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_ingest_context_cache_model "
+    "ON ingest_context_cache(model_name)",
+
+    # Phase 9.9: rerank-fallback telemetry table. Logged once per turn where
+    # the cross-encoder zero-filter trips and the unreranked top-k is used as
+    # a fallback. Surfaces in `hrag feedback-stats`.
+    "CREATE TABLE IF NOT EXISTS rerank_fallback_events ("
+    "    event_id          TEXT PRIMARY KEY,"
+    "    turn_id           TEXT NOT NULL,"
+    "    session_id        TEXT,"
+    "    user_id           TEXT,"
+    "    query             TEXT NOT NULL,"
+    "    dropped_chunk_ids TEXT,"
+    "    created_at        TEXT NOT NULL DEFAULT (datetime('now'))"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_rerank_fallback_session "
+    "ON rerank_fallback_events(session_id)",
 )
 
 

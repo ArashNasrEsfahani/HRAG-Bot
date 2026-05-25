@@ -421,7 +421,7 @@ class TaxonomyBuilder:
             excerpt=excerpt or "(no text available)",
         )
         try:
-            raw = self._llm.complete(prompt, temperature=0.0)
+            raw = self._llm.complete(prompt, temperature=0.0, max_tokens=150)
         except Exception as exc:  # noqa: BLE001
             logger.warning("summarize_doc(%s) LLM error: %s", doc_id, exc)
             return _clean_summary(title or "", max_chars)

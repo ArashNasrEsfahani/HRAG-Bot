@@ -72,10 +72,16 @@ class RetrievalPolicy:
         if intent == Intent.GREETING:
             return RetrievalPlan(scope="none", top_k_override=None, source_types=None)
         if intent == Intent.PERSONAL:
+            # Search BOTH uploaded documents and episodic memories.
+            # Previously this was episodic-only, which meant uploaded CVs /
+            # notes were never searched when the question was phrased personally
+            # (e.g. "find my master GPA" → PERSONAL → episodic-only → miss).
+            # Using scope="full" gives us reranking, which is necessary to
+            # surface a relevant document chunk when memories also match.
             return RetrievalPlan(
-                scope="episodic",
-                top_k_override=self._cfg.personal_top_k,
-                source_types=["episodic"],
+                scope="full",
+                top_k_override=None,          # use global top_k_vector
+                source_types=["document", "episodic"],
             )
         if intent == Intent.FACTUAL:
             return RetrievalPlan(scope="full", top_k_override=None, source_types=None)

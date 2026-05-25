@@ -196,6 +196,7 @@ def _build_inner_retriever(
             community_retriever=community_r,
             bm25_retriever=bm25_r,
             rrf_k=cfg.rrf_k,
+            short_circuit=getattr(cfg, "router_short_circuit", True),
         )
 
     if mode == "taxonomy":
@@ -262,7 +263,10 @@ def build_reranker(
     mode = cfg.reranker.lower().strip()
 
     if mode in ("cross_encoder", "ce", "cross-encoder"):
-        return CrossEncoderReranker(model_name=cfg.cross_encoder_model)
+        return CrossEncoderReranker(
+            model_name=cfg.cross_encoder_model,
+            quantize=cfg.rerank_quantize,
+        )
 
     if mode == "llm":
         return LLMReranker(llm)

@@ -338,6 +338,22 @@ _OPINION_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A self-reference that the user is the SUBJECT of — object/possessive pronouns
+# (me/my/myself; FA من/منو/خودم). Deliberately excludes the bare subject "i",
+# which appears in countless non-personal sentences ("i want to test you").
+_STRONG_SELF_REF_RE = re.compile(r"\b(?:me|myself|my)\b|من|منو|خودم", re.IGNORECASE)
+
+# Phrasings that frame the USER as the thing being characterised — "who I am",
+# "what I'm like", "as a person". These carry reflective intent without an
+# opinion-cue or object-pronoun, so they anchor on their own.
+_REFLECT_SUBJECT_RE = re.compile(
+    r"\bwho\s+(?:i\s+am|am\s+i)\b|"
+    r"\bwhat\s+(?:i\s+am|i'?m|am\s+i)\b|"
+    r"\bas\s+a\s+(?:person|human|individual|man|woman|guy)\b|"
+    r"\babout\s+me\b",
+    re.IGNORECASE,
+)
+
 
 def is_reflective_strict(query: str) -> bool:
     """High-precision reflective test — gates verdict *coercion*.
@@ -381,6 +397,31 @@ def is_reflective_query(query: str) -> bool:
         return True
     norm = _normalize_reflect(query)
     return bool(_SELF_REF_RE.search(_self_ref_text(query)) and _OPINION_CUE_RE.search(norm))
+
+
+def has_reflective_anchor(query: str) -> bool:
+    """Minimal textual signal that a message could be an opinion/impression
+    request *about the user* — corroborates the hybrid LLM "yes".
+
+    The hybrid LLM judge is a small, error-prone model; a lone false "yes" on a
+    neutral message ("Ok i want to test you") must not be enough to coerce the
+    turn into a reflective self-portrait. We only consult the judge — and only
+    let it coerce — when the text itself carries a reflective anchor:
+
+    * an opinion cue (think / opinion / impression / describe …), OR
+    * an object/possessive self-reference (me / my / myself; FA من/منو/خودم), OR
+    * a user-as-subject phrasing ("who I am", "what I'm like", "as a person").
+
+    The bare subject pronoun "i" alone is NOT an anchor. Pure function, no I/O.
+    """
+    if not query:
+        return False
+    norm = _normalize_reflect(query)
+    return bool(
+        _OPINION_CUE_RE.search(norm)
+        or _STRONG_SELF_REF_RE.search(_self_ref_text(query))
+        or _REFLECT_SUBJECT_RE.search(norm)
+    )
 
 
 def _mentions_entity(query: str, entities: set[str]) -> bool:

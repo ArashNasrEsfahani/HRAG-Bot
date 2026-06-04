@@ -23,6 +23,7 @@ from typing import Optional
 from hrag.intent import (
     Intent,
     IntentVerdict,
+    has_reflective_anchor,
     has_self_reference,
     is_reflective_query,
     is_reflective_strict,
@@ -355,3 +356,99 @@ def test_hybrid_uses_llm_when_regex_misses(sample_config) -> None:
     prompt = _answer_prompt(llm)
     assert llm.reflective_calls >= 1
     assert "reflective impression" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 5. Corroboration anchor — a lone weak LLM "yes" can't hijack a neutral message
+#    Regression for: "Ok i want to test you" → a fabricated self-portrait built
+#    from misattributed document chunks.
+# ---------------------------------------------------------------------------
+
+
+def test_anchor_rejects_neutral_and_bare_subject_i() -> None:
+    """Bare subject 'i' and neutral meta-statements carry no reflective anchor."""
+    negatives = [
+        "Ok i want to test you",      # the reported failure
+        "let's start the test",
+        "can you help me with this",  # 'help me' is imperative-object, stripped
+        "i want to ask you something",
+        "what is RAG",
+        "summarise this paper",
+        "",
+    ]
+    for q in negatives:
+        assert not has_reflective_anchor(q), q
+
+
+def test_anchor_accepts_genuine_reflective_phrasings() -> None:
+    """Opinion-cue, object/possessive self-ref, or user-as-subject phrasings
+    all anchor — including ones the recall regex misses."""
+    positives = [
+        "what do you think about me",          # opinion cue + me
+        "describe me",                          # opinion cue
+        "how would you describe me",
+        "what's your honest read on who I am as a person",  # read + who i am
+        "what's your gut feeling on who I am as a person",  # subject-only anchor
+        "tell me about myself",                 # myself survives 'tell me' strip
+        "نظرت درباره من",                       # FA strong self-ref
+    ]
+    for q in positives:
+        assert has_reflective_anchor(q), q
+
+
+def test_neutral_message_not_coerced_despite_llm_yes(sample_config) -> None:
+    """The reported bug: 'Ok i want to test you' with a stray LLM 'yes' must NOT
+    become a reflective self-portrait. No anchor → the judge is never even
+    consulted → no coercion, no synthesis prompt — for BOTH a FACTUAL base
+    verdict (coercion path) and a PERSONAL one (within-PERSONAL path)."""
+    doc = _result("c1", 0.9, "document",
+                  "And the king sought to control the child from its birth.")
+    for base in (Intent.FACTUAL, Intent.PERSONAL):
+        orch, llm, _ = _make_orch(sample_config, [doc], base,
+                                  reflection_mode="hybrid", reflective_reply="yes")
+        try:
+            orch.chat("Ok i want to test you", user_id="default")
+        finally:
+            _teardown(orch)
+        prompt = _answer_prompt(llm)
+        assert "reflective impression" not in prompt, base
+        assert llm.reflective_calls == 0, base
+
+
+def test_anchored_reflective_still_coerces_via_llm_in_hybrid(sample_config) -> None:
+    """A genuine reflective question the strict regex misses, but which carries
+    an anchor, is still rescued by the LLM judge and coerces FACTUAL → reflective
+    synthesis — the corroboration gate must not regress real recall."""
+    ep = _result("c1", 0.9, "episodic", "The user works at KareOne.")
+    q = "what's your honest read on who I am as a person"
+    assert not is_reflective_strict(q)   # strict genuinely misses ("on who I am")
+    assert has_reflective_anchor(q)      # but it anchors
+    orch, llm, _ = _make_orch(sample_config, [ep], Intent.FACTUAL,
+                              reflection_mode="hybrid", reflective_reply="yes")
+    try:
+        orch.chat(q, user_id="default")
+    finally:
+        _teardown(orch)
+    prompt = _answer_prompt(llm)
+    assert llm.reflective_calls >= 1
+    assert "reflective impression" in prompt
+
+
+def test_reflect_prompt_warns_against_document_misattribution() -> None:
+    """Layer A: the synthesis template must explicitly frame document excerpts
+    as NOT facts about the user, so the model can't recast a document's story
+    (a king, a birth) as the user's biography."""
+    from hrag.prompts_registry import PromptRegistry
+
+    prompts_dir = Path(__file__).resolve().parents[1] / "src" / "hrag" / "prompts"
+    registry = PromptRegistry(prompts_dir)
+    rendered = registry.render_personal_reflect(
+        user_profile="(no profile yet)",
+        retrieved_memories="(nothing saved yet)",
+        retrieved_docs="And the king sought to control the child from its birth.",
+        conversation_history="(no prior conversation)",
+        question="Ok i want to test you",
+    )
+    low = rendered.lower()
+    assert "not facts about the user" in low or "not the user" in low
+    assert "biography" in low

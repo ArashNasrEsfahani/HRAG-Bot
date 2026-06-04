@@ -72,7 +72,7 @@ from hrag.intent import (
     IntentClassifier,
     IntentVerdict,
     ReflectiveClassifier,
-    has_self_reference,
+    has_reflective_anchor,
     is_reflective_query,
     is_reflective_strict,
 )
@@ -847,10 +847,17 @@ class Orchestrator:
         mode = getattr(cfg.retrieval, "reflection_mode", "hybrid")
         strict_hit = mode != "off" and is_reflective_strict(question)
         loose_hit = mode != "off" and is_reflective_query(question)
+        # The hybrid LLM judge is a small, error-prone model: a lone false "yes"
+        # on a neutral message ("Ok i want to test you") must not be enough to
+        # turn the reply into a reflective self-portrait. Require a textual
+        # reflective anchor (opinion cue / me-my-myself / "who I am") before we
+        # consult the judge OR let it coerce — for BOTH non-PERSONAL coercion
+        # and within-PERSONAL turns. Genuine reflective questions always carry
+        # an anchor; bare subject "i" does not.
         llm_hit = (
             mode == "hybrid"
             and not strict_hit
-            and (intent == Intent.PERSONAL or has_self_reference(question))
+            and has_reflective_anchor(question)
             and self._reflective_llm_signal(question, history_rows, preflight_decision)
         )
         if mode != "off" and intent != Intent.PERSONAL and (strict_hit or llm_hit):

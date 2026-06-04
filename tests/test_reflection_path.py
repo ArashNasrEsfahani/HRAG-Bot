@@ -452,3 +452,46 @@ def test_reflect_prompt_warns_against_document_misattribution() -> None:
     low = rendered.lower()
     assert "not facts about the user" in low or "not the user" in low
     assert "biography" in low
+
+
+# ---------------------------------------------------------------------------
+# 6. Layer A hardening — document content can't be recited as the user's bio.
+#    Even if a reflective turn DOES fire, an unrelated document chunk (a novel's
+#    plot) never reaches the synthesis prompt, so a weak model can't misattribute
+#    it. Model-independent guard.
+# ---------------------------------------------------------------------------
+
+
+def test_user_identifying_terms_and_about_user() -> None:
+    from hrag.orchestrator import _chunk_is_about_user, _user_identifying_terms
+
+    assert _user_identifying_terms("(no profile yet)") == set()
+    assert _user_identifying_terms("") == set()
+    terms = _user_identifying_terms("Facts about you: employer KareOne; researches HRAG")
+    assert "kareone" in terms and "hrag" in terms
+    assert "about" not in terms and "your" not in terms  # stopworded
+    # A Red Book chunk mentions none of the user's distinctive terms.
+    assert not _chunk_is_about_user("And the king sought to control the child.", terms)
+    # A chunk mentioning the employer IS about the user.
+    assert _chunk_is_about_user("Arash works at KareOne on retrieval.", terms)
+    # Empty terms (thin/no profile) ⇒ never about the user.
+    assert not _chunk_is_about_user("anything at all", set())
+
+
+def test_reflect_excludes_documents_not_about_user(sample_config) -> None:
+    """A genuine reflective turn whose only retrieved doc is unrelated narrative
+    (no user terms, thin profile) must keep that text OUT of the synthesis
+    prompt — the actual fix for the Red-Book-as-biography failure."""
+    red_book = _result("c1", 0.9, "document",
+                       "And the king sought to control the child from its birth.")
+    orch, llm, _ = _make_orch(sample_config, [red_book], Intent.PERSONAL,
+                              reflection_mode="regex")
+    try:
+        orch.chat("what do you think about me?", user_id="default")
+    finally:
+        _teardown(orch)
+
+    prompt = _answer_prompt(llm)
+    assert "reflective impression" in prompt            # reflect template used
+    assert "the king sought to control" not in prompt   # doc content excluded
+    assert "no personal documents on file" in prompt

@@ -1760,19 +1760,22 @@ class Orchestrator:
                 detail_hint=_detail_hint(question),
             )
         elif intent == Intent.PERSONAL and reflective_turn:
-            # Phase 11 — reflective impression. Synthesise from profile +
-            # memories + whatever document chunks survived, rather than
-            # reciting one fact and offering to search. We deliberately feed
-            # ALL retrieved material (episodic AND document) so the model has
-            # the richest possible picture; the prompt is responsible for
-            # forming a grounded opinion without inventing facts.
+            # Phase 11 — reflective impression. Synthesise from the user's saved
+            # profile + episodic memories. Document chunks are included ONLY when
+            # they actually mention the user: a reflective "impression of you"
+            # must never recite a document's CONTENT (a novel's plot, a paper's
+            # narrative) as the user's biography. A weak local model will ignore
+            # a prompt instruction to that effect, so the robust guard is to keep
+            # unrelated document text out of the prompt entirely.
             episodic_results = [
                 r for r in results
                 if getattr(r.chunk, "source_type", "") == "episodic"
             ]
+            _uterms = _user_identifying_terms(user_profile)
             doc_results = [
                 r for r in results
                 if getattr(r.chunk, "source_type", "") != "episodic"
+                and _chunk_is_about_user(getattr(r.chunk, "text", "") or "", _uterms)
             ]
             memories_block = (
                 _format_passages(episodic_results)
@@ -1780,7 +1783,7 @@ class Orchestrator:
             )
             docs_block = (
                 _format_passages(doc_results)
-                if doc_results else "(no documents matched)"
+                if doc_results else "(no personal documents on file)"
             )
             prompt = self.prompts.render_personal_reflect(
                 user_profile=user_profile,
@@ -2469,6 +2472,41 @@ def _format_passages(results: list[RetrievalResult]) -> str:
         header = f"[Source {i} | {chunk.title or 'Untitled'} | {chunk.section or 'N/A'}]"
         parts.append(f"{header}\n{chunk.text}")
     return "\n\n".join(parts)
+
+
+# Words that show up in profile renders but don't identify the user — ignored
+# when deciding whether a document chunk is actually ABOUT the user (Phase 11
+# reflective-synthesis guard).
+_PROFILE_STOPWORDS = frozenset({
+    "facts", "fact", "know", "knows", "about", "your", "yours", "user",
+    "users", "profile", "none", "name", "named", "call", "called", "prefers",
+    "prefer", "likes", "like", "interested", "interest", "interests", "works",
+    "work", "working", "based", "from", "with", "that", "this", "they", "them",
+    "their", "here", "what", "have", "has", "the", "and", "for", "you",
+})
+
+
+def _user_identifying_terms(profile: str) -> set[str]:
+    """Distinctive tokens (≥4 chars, non-stopword) from a profile render, used
+    to test whether a document chunk is actually about the user. Empty set for
+    an empty / "(no profile yet)" profile — callers then exclude ALL documents
+    from the reflective synthesis."""
+    if not profile or profile.strip().lower() in {"", "(no profile yet)"}:
+        return set()
+    return {
+        t for t in re.findall(r"[a-z0-9]{4,}", profile.lower())
+        if t not in _PROFILE_STOPWORDS
+    }
+
+
+def _chunk_is_about_user(text: str, terms: set[str]) -> bool:
+    """True only when a document chunk references a distinctive user term — so a
+    reflective impression can never recast unrelated document content (e.g. a
+    novel's plot) as the user's biography. Empty terms ⇒ never about the user."""
+    if not terms or not text:
+        return False
+    low = text.lower()
+    return any(t in low for t in terms)
 
 
 def _format_history(pairs: list[tuple[str, str]]) -> str:

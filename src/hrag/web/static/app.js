@@ -1980,6 +1980,76 @@ function handleSSE(chunk, els) {
       }
       break;
     }
+    // ---- Phase 13: deep-read document map ----
+    case 'deep_read_start':
+      renderDeepReadStart(els, (typeof data === 'object' && data) || {});
+      break;
+    case 'section_opened':
+      markSectionOpened(els, (typeof data === 'object' && data) || {});
+      break;
+    case 'deep_read_pass':
+      appendDeepReadPass(els, (typeof data === 'object' && data) || {});
+      break;
+  }
+}
+
+// ---------- Phase 13: deep-read document-map panel ----------
+function renderDeepReadStart(els, p) {
+  if (!els || !els.wrap || !els.bubble) return;
+  const parts = Array.isArray(p.parts) ? p.parts : [];
+  const panel = document.createElement('div');
+  panel.className = 'deepread';
+  const rows = parts.map(pt =>
+    `<li class="dr-part" data-idx="${pt.idx}">` +
+      `<span class="dr-mark">○</span>` +
+      `<span class="dr-label">${escapeHTML(pt.label || ('Part ' + ((pt.idx || 0) + 1)))}</span>` +
+      `<span class="dr-q"></span>` +
+    `</li>`).join('');
+  panel.innerHTML =
+    `<div class="dr-head">` +
+      `<span class="dr-book">📖</span>` +
+      `<span class="dr-title">Reading: ${escapeHTML(p.doc_title || 'document')}</span>` +
+      `<span class="dr-status">opening…</span>` +
+    `</div>` +
+    `<ul class="dr-parts">${rows}</ul>` +
+    `<div class="dr-notes" hidden></div>`;
+  els.wrap.insertBefore(panel, els.bubble);
+  els._dr = {
+    panel,
+    rows: new Map([...panel.querySelectorAll('.dr-part')].map(li => [Number(li.dataset.idx), li])),
+    status: panel.querySelector('.dr-status'),
+    notes: panel.querySelector('.dr-notes'),
+  };
+  setPhase(els, 'retrieve', 'deep reading…');
+}
+
+function markSectionOpened(els, p) {
+  const dr = els && els._dr;
+  if (!dr) return;
+  const li = dr.rows.get(Number(p.idx));
+  if (!li) return;
+  li.classList.add('read');
+  const mark = li.querySelector('.dr-mark');
+  if (mark) mark.textContent = '✓';
+  const q = li.querySelector('.dr-q');
+  if (q) q.textContent = p.quotes ? String(p.quotes) : '';
+  // re-trigger the pulse animation
+  li.classList.remove('dr-pulse');
+  void li.offsetWidth;
+  li.classList.add('dr-pulse');
+}
+
+function appendDeepReadPass(els, p) {
+  const dr = els && els._dr;
+  if (!dr) return;
+  if (dr.status) dr.status.textContent = `pass ${p.pass || ''}`;
+  const note = (p.note || '').trim();
+  if (note && dr.notes) {
+    dr.notes.hidden = false;
+    const line = document.createElement('div');
+    line.className = 'dr-note';
+    line.textContent = note;
+    dr.notes.appendChild(line);
   }
 }
 

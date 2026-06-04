@@ -3681,3 +3681,45 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
 .bubble .cot-body blockquote { font-style: normal; opacity: 0.92; }
 /* An evidence block must never overflow the bubble horizontally. */
 .bubble pre { max-width: 100%; overflow-x: auto; }
+
+/* ---- Phase 13: deep-read document map ---- */
+.deepread {
+  margin: 0.4rem 0 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.dr-head {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82rem;
+}
+.dr-book { opacity: 0.85; }
+.dr-title { font-weight: 600; color: var(--ink); }
+.dr-status {
+  margin-left: auto; color: var(--muted); font-size: 0.68rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.dr-parts { list-style: none; margin: 0; padding: 0.3rem 0; }
+.dr-part {
+  display: flex; align-items: center; gap: 0.55rem;
+  padding: 0.24rem 0.85rem;
+  color: var(--muted); font-size: 0.86rem;
+  transition: color var(--t-base) var(--ease);
+}
+.dr-part .dr-mark { width: 1em; text-align: center; color: var(--muted-2); font-size: 0.85em; }
+.dr-part.read { color: var(--ink); }
+.dr-part.read .dr-mark { color: var(--accent); }
+.dr-part .dr-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-part .dr-q { margin-left: auto; font-size: 0.7rem; color: var(--muted-2); flex: none; }
+.dr-part .dr-q:not(:empty)::after { content: ' quotes'; }
+@keyframes drPulse {
+  0%   { background: rgba(184, 168, 122, 0.20); }
+  100% { background: transparent; }
+}
+.dr-part.dr-pulse { animation: drPulse 0.9s var(--ease); }
+.dr-notes { padding: 0.4rem 0.85rem 0.55rem; border-top: 1px solid var(--line); }
+.dr-note { color: var(--muted); font-size: 0.84rem; line-height: 1.5; margin: 0.18rem 0; }
+.dr-note::before { content: '\203a '; color: var(--accent-3); }

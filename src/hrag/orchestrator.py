@@ -76,6 +76,12 @@ from hrag.intent import (
     is_reflective_query,
     is_reflective_strict,
 )
+from hrag.deepread import (
+    DeepReadState,
+    build_parts,
+    is_broad_query,
+    pick_target_doc,
+)
 from hrag.interaction import InteractionStore, ReviewDecision, maybe_pause
 from hrag.prompts_registry import PromptRegistry
 from hrag.providers.embeddings import get_embedding_provider
@@ -878,6 +884,39 @@ class Orchestrator:
             "llm": llm_hit,
             "reflective": reflective_turn,
         })
+
+        # 3d-deep. Phase 13 — agentic deep read on broad/exploratory questions.
+        # Reads the single best-matching document section-by-section across
+        # several passes, visualised live. Stream-only (the document-map panel
+        # needs the SSE channel); skipped under the Phase-8 review loop.
+        if (
+            stream
+            and cfg.deep_read.enabled
+            and cfg.deep_read.auto_trigger
+            and intent in (Intent.FACTUAL, Intent.GENERAL)
+            and not reflective_turn
+            and not cfg.interaction.review_enabled
+            and is_broad_query(question)
+        ):
+            dr = self._run_deep_read(
+                question=question,
+                user_id=user_id,
+                session_id=session_id,
+                history_rows=history_rows,
+                emit=_emit,
+                t_start=t_start,
+            )
+            if dr is not None:
+                if _emb_token is not None:
+                    try:
+                        from hrag.providers.embeddings import (  # noqa: PLC0415
+                            _session_var as _evs,
+                        )
+                        _evs.reset(_emb_token)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return dr
+            # No suitable document → fall through to the normal one-pass path.
 
         # 3d. Retrieval-policy dispatch.
         plan: RetrievalPlan = self.retrieval_policy.plan(intent)
@@ -2212,6 +2251,199 @@ class Orchestrator:
                 return False
         return self._reflective_classifier.classify(question, history=history_rows)
 
+    # ------------------------------------------------------------------
+    # Phase 13 — agentic deep read
+    # ------------------------------------------------------------------
+    def _run_deep_read(
+        self,
+        *,
+        question: str,
+        user_id: str,
+        session_id: str,
+        history_rows: list[tuple[str, str]],
+        emit: Callable[[str, dict], None],
+        t_start: float,
+    ) -> Optional[ChatResult]:
+        """Iterative section-by-section read of the single best-matching
+        document. Returns a ChatResult, or None to fall back to the normal path
+        (no document matched). Emits ``deep_read_start`` / ``section_opened`` /
+        ``deep_read_pass`` / ``generate_token`` / ``deep_read_followups``."""
+        cfg = self.config
+        dcfg = cfg.deep_read
+        prompts_dir = Path(__file__).parent / "prompts"
+
+        # 1. Seed retrieval → choose the document to read.
+        try:
+            seed = self.retriever.retrieve(question, user_id, top_k=dcfg.seed_top_k)
+        except Exception:  # noqa: BLE001
+            logger.exception("deep_read: seed retrieval failed")
+            return None
+        target = pick_target_doc(seed)
+        if target is None:
+            return None
+        doc_id, doc_title = target
+
+        # 2. Document map from the doc's chunks (chunk_index, section).
+        rows = self.db.execute(
+            "SELECT chunk_id, chunk_index, section FROM chunks "
+            "WHERE doc_id = ? AND user_id = ? AND source_type = 'document' "
+            "ORDER BY chunk_index",
+            (doc_id, user_id),
+        ).fetchall()
+        if not rows:
+            return None
+        cid2idx = {r["chunk_id"]: (r["chunk_index"] or 0) for r in rows}
+        parts = build_parts(
+            [((r["chunk_index"] or 0), (r["section"] or "")) for r in rows], n_parts=10
+        )
+        state = DeepReadState(doc_id=doc_id, doc_title=doc_title, parts=parts)
+        emit("deep_read_start", {
+            "doc_id": doc_id,
+            "doc_title": doc_title,
+            "question": question,
+            "parts": [p.public() for p in parts],
+        })
+        logger.info("deep_read: reading %r across %d parts", doc_title, len(parts))
+
+        all_results: list[RetrievalResult] = []
+        current_query = question
+
+        # 3. Read passes — each plans the next from what it just read.
+        for pass_no in range(1, dcfg.max_passes + 1):
+            state.passes = pass_no
+            try:
+                cand = self.retriever.retrieve(
+                    current_query, user_id, top_k=max(40, dcfg.chunks_per_pass * 6)
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("deep_read: pass %d retrieval failed", pass_no)
+                cand = []
+            fresh: list[RetrievalResult] = []
+            for r in cand:
+                ch = r.chunk
+                if getattr(ch, "doc_id", None) != doc_id:
+                    continue
+                cid = getattr(ch, "chunk_id", None)
+                if not cid or cid in state.seen_chunk_ids:
+                    continue
+                fresh.append(r)
+                if len(fresh) >= dcfg.chunks_per_pass:
+                    break
+            if not fresh:
+                break
+
+            parts_touched: dict = {}
+            for r in fresh:
+                cid = r.chunk.chunk_id
+                state.seen_chunk_ids.add(cid)
+                p, _ = state.open_for_index(cid2idx.get(cid, 0))
+                if p is not None:
+                    parts_touched[p.idx] = p
+            all_results.extend(fresh)
+
+            for p in sorted(parts_touched.values(), key=lambda x: x.idx):
+                emit("section_opened", {"idx": p.idx, "label": p.label, "quotes": p.quotes})
+
+            note, next_query, done = self._deep_read_pass_llm(
+                prompts_dir, question=question, doc_title=doc_title,
+                notes_so_far=state.notes, new_results=fresh,
+            )
+            if note:
+                state.notes.append(note)
+            emit("deep_read_pass", {
+                "pass": pass_no,
+                "note": note,
+                "next_query": next_query,
+                "sections_read": sorted(parts_touched),
+            })
+            # Honour the model's stop signal only after min_passes — small
+            # models tend to bail after one pass, which undersells the read.
+            # When continuing without a fresh query, fall back to the original
+            # question so the next pass pulls the next-best *unseen* chunks.
+            if (done or not next_query.strip()) and pass_no >= dcfg.min_passes:
+                break
+            current_query = next_query.strip() or question
+
+        # 4. Final synthesis (streamed into the answer bubble).
+        synth_prompt = (prompts_dir / "deep_read_synthesize.md").read_text(
+            encoding="utf-8"
+        ).format(
+            doc_title=doc_title,
+            question=question,
+            notes="\n".join(f"- {n}" for n in state.notes) or "(no notes gathered)",
+            passages=_format_passages(all_results[:8]),
+        )
+        emit("generate_start", {"deep_read": True})
+        from hrag.types import GenerationRequest  # noqa: PLC0415
+
+        req = GenerationRequest(
+            messages=[Message(role="user", content=synth_prompt)], max_tokens=900
+        )
+        out: list[str] = []
+        for piece in self.llm.generate_stream(req):
+            out.append(piece)
+            emit("generate_token", {"token": piece})
+        answer = strip_uncertain("".join(out).strip())
+        emit("generate", {"answer_chars": len(answer), "deep_read": True})
+
+        # 5. Follow-up suggestions grounded in what was read.
+        chips = self._deep_read_followups(prompts_dir, question, answer, dcfg.followups)
+        if chips:
+            emit("followups", {"chips": chips})  # reuse the existing chip UI
+
+        # 6. Persist + return.
+        self._save_message(session_id, user_id, "assistant", answer)
+        self.db.commit()
+        self._session_last_intent[session_id] = Intent.FACTUAL
+        emit("done", {"total_s": time.time() - t_start, "deep_read": True,
+                      "passes": state.passes, "parts_read": len(parts) - state.remaining()})
+        return ChatResult(
+            answer=answer, session_id=session_id, sources=all_results, prompt=synth_prompt
+        )
+
+    def _deep_read_pass_llm(
+        self, prompts_dir: Path, *, question: str, doc_title: str,
+        notes_so_far: list[str], new_results: list[RetrievalResult],
+    ) -> tuple[str, str, bool]:
+        """One planning call: returns (note, next_query, done)."""
+        prompt = (prompts_dir / "deep_read_pass.md").read_text(encoding="utf-8").format(
+            doc_title=doc_title,
+            question=question,
+            notes_so_far="\n".join(f"- {n}" for n in notes_so_far) or "(nothing yet)",
+            passages=_format_passages(new_results),
+        )
+        try:
+            raw = self.llm.complete(prompt, temperature=0.1, max_tokens=300)
+        except Exception:  # noqa: BLE001
+            logger.exception("deep_read: pass-plan LLM call failed")
+            return "", "", True
+        data = _loose_json(raw)
+        return (
+            str(data.get("note", "")).strip(),
+            str(data.get("next_query", "")).strip(),
+            bool(data.get("done", False)),
+        )
+
+    def _deep_read_followups(
+        self, prompts_dir: Path, question: str, answer: str, n: int
+    ) -> list[str]:
+        try:
+            tmpl = (prompts_dir / "followups.md").read_text(encoding="utf-8")
+            raw = self.llm.complete(
+                tmpl.format(question=question, answer=answer[:1500]),
+                temperature=0.5, max_tokens=120,
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        chips: list[str] = []
+        for line in (raw or "").splitlines():
+            c = _strip_bullet(line)
+            if c:
+                chips.append(c)
+            if len(chips) >= n:
+                break
+        return chips
+
     def _create_session(self, session_id: str, user_id: str) -> None:
         with self.db.conn:
             self.db.execute(
@@ -2507,6 +2739,21 @@ def _chunk_is_about_user(text: str, terms: set[str]) -> bool:
         return False
     low = text.lower()
     return any(t in low for t in terms)
+
+
+def _loose_json(raw: str) -> dict:
+    """Best-effort parse of the first ``{...}`` object in an LLM reply. Returns
+    {} on failure — small models wrap JSON in prose or fences."""
+    if not raw:
+        return {}
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _format_history(pairs: list[tuple[str, str]]) -> str:

@@ -670,6 +670,24 @@ class InteractionConfig(BaseModel):
     expand_doc_enabled: bool = True
 
 
+class DeepReadConfig(BaseModel):
+    """Phase 13 — agentic iterative "deep read" over a single document.
+
+    On a broad/exploratory question the orchestrator reads a document
+    section-by-section across several passes (each pass plans the next from what
+    it just learned), visualised live in the GUI, then proposes follow-ups.
+    """
+
+    enabled: bool = True            # master switch
+    auto_trigger: bool = True       # fire automatically on broad questions
+    max_passes: int = 4             # hard cap on read→plan iterations
+    min_passes: int = 2             # always iterate at least this many (while doc has more)
+    seed_top_k: int = 12            # initial corpus retrieval used to pick the doc
+    chunks_per_pass: int = 6        # chunks pulled per pass (scoped to the doc)
+    min_rerank_score: float = -7.0  # stop when a pass surfaces nothing above this
+    followups: int = 3              # follow-up suggestions offered at the end
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
@@ -686,6 +704,7 @@ class Config(BaseModel):
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     formula_extraction: FormulaExtractionConfig = Field(default_factory=FormulaExtractionConfig)
     interaction: InteractionConfig = Field(default_factory=InteractionConfig)
+    deep_read: DeepReadConfig = Field(default_factory=DeepReadConfig)
 
     project_root: Path = Field(default_factory=lambda: Path.cwd())
 

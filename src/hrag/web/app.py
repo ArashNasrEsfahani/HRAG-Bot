@@ -755,6 +755,10 @@ async def chat(req: ChatRequest):
             if event == "followups":
                 yield _sse_pack("followups", payload)
                 continue
+            # Phase 13 — deep-read document-map events as first-class SSE.
+            if event in ("deep_read_start", "section_opened", "deep_read_pass"):
+                yield _sse_pack(event, payload)
+                continue
             # Everything else (retrieve_start, rerank_done, …) goes through
             # as a generic progress event.
             yield _sse_pack("progress", {"event": event, "payload": payload})

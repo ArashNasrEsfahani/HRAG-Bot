@@ -880,8 +880,10 @@
   <!-- KaTeX + auto-render: typesets $..$, $$..$$, \(..\), \[..\] in answers -->
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-  <!-- D3 for the taxonomy editor -->
-  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- D3 for the taxonomy editor + KG graph. Vendored locally (was
+       https://d3js.org/d3.v7.min.js) so it renders reliably offline / when
+       that single-host CDN is unreachable — the cause of the blank taxonomy. -->
+  <script src="/static/d3.v7.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -109,6 +109,8 @@ class EmbeddingsConfig(BaseModel):
          "model": "jinaai/jina-embeddings-v2-base-en", "dim": 768},
         {"label": "bge-small-en-v1.5 (fast, 384-d)",
          "model": "BAAI/bge-small-en-v1.5", "dim": 384},
+        {"label": "potion-retrieval-32M (model2vec, ~500x faster, static)",
+         "model": "minishlab/potion-retrieval-32M", "dim": 512, "provider": "model2vec"},
     ])
 
     # Phase 9.3 — per-session query embedding LRU cache. Eliminates redundant
@@ -119,17 +121,46 @@ class EmbeddingsConfig(BaseModel):
     query_cache_size: int = 64
 
     # Phase 9.7 — precision / backend selector for SentenceTransformersProvider.
-    # "fp32" (default): full float32, same as today, no behavioural change.
-    # "fp16":           half-precision on GPU. ~50% VRAM cut, ~1.5–2x throughput.
-    #                   Auto-falls back to fp32 when CUDA is unavailable.
-    # "onnx_int8":      quantized ONNX export via optimum/onnxruntime. Best
-    #                   throughput on CPU (>2x), zero GPU dep. Requires the
-    #                   `quantize` optional dep group (same as the Phase-9.8
-    #                   reranker — installs `optimum[onnxruntime]` + `onnxruntime`).
+    # Kept as a back-compat alias; new code should set `precision` instead.
+    # Supported modes (valid for both `embed_precision` and `precision`):
+    #   "fp32"      (default): full float32, same as today, no behavioural change.
+    #   "fp16":                half-precision on GPU. ~50% VRAM cut, ~1.5–2x
+    #                          throughput. Auto-falls back to fp32 on CPU.
+    #   "bf16":                bfloat16 on GPU; better numerical stability than
+    #                          fp16. Auto-falls back to fp32 on CPU.
+    #   "onnx":                native sentence-transformers ONNX backend. CPU-
+    #                          friendly; no quantization. Requires optimum.
+    #   "onnx_int8":           ONNX + int8 dynamic quantization. Best CPU
+    #                          throughput (>2x). Requires the `quantize` optional
+    #                          dep group (`optimum[onnxruntime]` + `onnxruntime`).
+    #   "openvino":            Intel-optimized backend (mainly Intel CPUs).
+    #                          Requires the `openvino` optional dep group.
+    # When `precision` is set (non-None) it supersedes `embed_precision`.
     embed_precision: str = "fp32"
     # Device hint for SentenceTransformersProvider. None = let the library pick
     # (CUDA if available, else CPU). Set to "cuda", "cuda:0", "cpu", or "mps".
     embed_device: Optional[str] = None
+
+    # Phase 10 — modular embedding backends.
+    # When set, supersedes `embed_precision`. See the mode table in the comment
+    # above for valid values.
+    precision: Optional[str] = None
+
+    # Phase 10 — batch size used at ingest time by IngestPipeline._embed_chunks.
+    # Was hardcoded as _EMBED_BATCH_SIZE=8 in pipeline.py; raised to 32 by
+    # default for better throughput, configurable per-corpus. Progress events
+    # still emit per-batch, just with larger batches.
+    embed_batch_size: int = 32
+
+    # Phase 10 — where sentence-transformers caches the exported ONNX model.
+    # None lets the library pick (typically ~/.cache/huggingface/...). Set this
+    # when you want the export to live alongside your project data.
+    embed_onnx_cache_dir: Optional[str] = None
+
+    # Phase 10 — ONNX graph optimization level passed to sentence-transformers'
+    # export_optimized_onnx_model. Valid: "O1" | "O2" | "O3" | "O4". O3 is the
+    # recommended trade-off between optimization and load time.
+    embed_onnx_optimization: str = "O3"
 
 
 class StorageConfig(BaseModel):
@@ -144,8 +175,8 @@ class KGConfig(BaseModel):
 
     enabled: bool = False                  # master switch; opt-in for Phase 1 users
     backend: str = "networkx"              # KG backend: "networkx" (default) | "neo4j"
-                                           # (Phase 5 stub — raises NotImplementedError
-                                           # on every op until implemented).
+                                           # (both real; neo4j needs the `neo4j` extra +
+                                           # NEO4J_URI, else errors on first op).
     use_communities: bool = False          # GraphRAG community detection + summarization
                                            # (slow at ingest, marginal accuracy gain;
                                            # default off — opt in for global/sensemaking
@@ -190,10 +221,9 @@ class RetrievalConfig(BaseModel):
     top_k_final: int = 6
     rerank_enabled: bool = True
 
-    # Vector-store backend selector: "chroma" (default) | "sqlite_vec" (stub).
-    # See hrag.retrieval.backends for the protocol. Switching is a refactor
-    # seam — sqlite_vec is not implemented yet and raises NotImplementedError
-    # on any operation.
+    # Vector-store backend selector: "chroma" (default) | "sqlite_vec".
+    # See hrag.retrieval.backends for the protocol. Both are real;
+    # sqlite_vec needs the `sqlite-vec` extra installed.
     vector_backend: str = "chroma"
 
     # Retriever choice: "vector" | "bm25" | "hybrid"
@@ -269,6 +299,20 @@ class RetrievalConfig(BaseModel):
     # source_types (the pre-Phase-8.1 behaviour) — useful for users with
     # massive corpora where memories should never compete with documents.
     always_include_episodic: bool = True
+
+    # Phase 11.1 — reflective / opinion personal-question detection mode.
+    # On a reflective turn the orchestrator (a) broadens retrieval to pull
+    # document chunks about the user in addition to episodic memories, and
+    # (b) renders a synthesis prompt that forms a genuine warm impression
+    # instead of reciting one saved fact and offering to search.
+    #   "hybrid" — hardened regex fast-path, then an LLM reflective signal
+    #              when the regex misses (best recall + multilingual).
+    #   "regex"  — pure regex only, deterministic, no LLM (contract-19 style).
+    #   "off"    — feature disabled (true no-op; equals the old
+    #              reflection_enabled=False).
+    # Switchable live from the web side panel. See orchestrator 3d-pre/3d-bis
+    # and `is_reflective_strict` / `is_reflective_query` in intent.py.
+    reflection_mode: str = "hybrid"
 
     # Phase 7-A — math-meta query handling. Detect "formula"/"equation" meta-queries
     # and pass where={"has_math": True} into the retriever. Off by default — run
@@ -521,6 +565,24 @@ class TaxonomyConfig(BaseModel):
                                                         # the lowest-scoring leaves are
                                                         # dropped until the cap holds.
                                                         # Set to 1.0 to disable.
+    # Phase 12 — hybrid (dense + keyword) routing --------------------------
+    keyword_routing_enabled: bool = True               # blend per-node keyword overlap
+                                                        # into beam-descend scoring. Default
+                                                        # ON for accuracy; a true no-op
+                                                        # until a tree has keywords (built
+                                                        # with the keyword-aware propose
+                                                        # prompt or backfilled via
+                                                        # `hrag taxonomy keywords`).
+    keyword_weight: float = 0.20                       # combined = cosine + weight*overlap
+    keywords_per_node: int = 8                         # target keywords per node
+    keyword_tiebreak_skip: bool = True                 # DocAssigner: skip the LLM tiebreak
+                                                        # when the keyword signal already
+                                                        # separates the top-2 candidates.
+    cache_tree_in_memory: bool = True                  # cache the per-user node set for
+                                                        # the beam-descend hot path; a write
+                                                        # through the store invalidates it,
+                                                        # and it self-expires after a short
+                                                        # TTL so external rebuilds are seen.
 
 
 class CompactionConfig(BaseModel):

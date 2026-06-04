@@ -520,13 +520,14 @@ class TripleExtractor:
 
         all_triples: list[Triple] = []
         chunks_list = list(chunks)
+        n_total = len(chunks_list) or 1
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             # Submit in order; zip preserves correspondence.
             futures = [
                 (executor.submit(self.extract_one, chunk, drop_counts), chunk)
                 for chunk in chunks_list
             ]
-            for fut, chunk in futures:
+            for i, (fut, chunk) in enumerate(futures, start=1):
                 try:
                     all_triples.extend(fut.result())
                 except Exception as exc:  # noqa: BLE001
@@ -535,6 +536,18 @@ class TripleExtractor:
                         f"{chunk.chunk_id!r}: {exc}",
                         stacklevel=2,
                     )
+                # Per-chunk progress so the UI bar advances during this
+                # long phase. Sharing the "kg_extract" event name with the
+                # pipeline-level bracketing means the front-end updates a
+                # single canonical stage rather than spawning new ones.
+                self._emit(
+                    "kg_extract",
+                    {
+                        "message": f"Extracted {i}/{n_total} chunks",
+                        "n_done": i,
+                        "n_total": n_total,
+                    },
+                )
 
         if drop_counts:
             total = sum(drop_counts.values())

@@ -339,6 +339,14 @@ class SqliteVecBackend:
         row = self._conn.execute(f"SELECT COUNT(*) FROM {_META_TABLE}").fetchone()
         return int(row[0]) if row else 0
 
+    def dim(self) -> Optional[int]:
+        """Return the stored embedding dimensionality, or None when no vectors exist yet.
+
+        Reads ``self._dim`` which is sniffed from the ``vec0`` table DDL in
+        ``__init__`` (or set on first upsert). Returns None for a fresh DB.
+        """
+        return self._dim
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

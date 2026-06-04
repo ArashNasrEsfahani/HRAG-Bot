@@ -372,7 +372,7 @@ def test_short_interrogative_greeting_stays_greeting() -> None:
 def test_fast_path_verdicts_not_cached() -> None:
     """Fast-path verdicts must NOT be stored in the cache — only LLM verdicts.
     Without this, a source-level fix can't take effect in a long-lived
-    Streamlit process."""
+    server process."""
     clf = IntentClassifier(llm=None, fast_only=True)
     clf.classify("hey")
     clf.classify("what is RAG?")

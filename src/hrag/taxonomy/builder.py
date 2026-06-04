@@ -852,6 +852,17 @@ class TaxonomyBuilder:
         children = node_json.get("children")
         doc_ids = node_json.get("doc_ids")
 
+        # Phase 12 — per-node keywords. Prefer the LLM-proposed list (free,
+        # emitted by the keyword-aware propose prompt); fall back to a local
+        # extraction over the node's signal text (label + description + member
+        # doc summaries for a leaf) so no node is left un-keyworded.
+        kw_raw = node_json.get("keywords")
+        node_keywords: list[str] = []
+        if isinstance(kw_raw, list):
+            node_keywords = [str(k).strip() for k in kw_raw if str(k).strip()]
+        if not node_keywords:
+            node_keywords = self._local_keywords(label, description, doc_ids, doc_meta)
+
         # Disambiguate leaf vs internal. The schema requires exactly one of the
         # two but we defend against minor LLM drift.
         is_leaf = bool(doc_ids) and not children
@@ -876,6 +887,7 @@ class TaxonomyBuilder:
             label,
             description,
             is_leaf=is_leaf,
+            keywords=node_keywords,
         )
         node_id = new_node.node_id
         stats["nodes_created"] += 1
@@ -905,6 +917,36 @@ class TaxonomyBuilder:
         for child in (children or []):
             if isinstance(child, dict):
                 self._walk_node(user_id, node_id, child, doc_meta, stats, depth + 1)
+
+
+    def _local_keywords(
+        self,
+        label: str,
+        description: str,
+        doc_ids,
+        doc_meta: dict[str, dict],
+    ) -> list[str]:
+        """Extract keywords locally (no LLM) from a node's signal text.
+
+        Uses the label + description plus, for a leaf, its member doc summaries.
+        Pure/cheap — the fallback when the LLM omitted ``keywords``.
+        """
+        from hrag.taxonomy.keywords import extract_keywords  # local import
+
+        texts: list[str] = []
+        if label:
+            texts.append(label)
+        if description:
+            texts.append(description)
+        if isinstance(doc_ids, list):
+            for did in doc_ids:
+                meta = doc_meta.get(did) if isinstance(did, str) else None
+                if meta:
+                    summ = meta.get("summary") or meta.get("title")
+                    if summ:
+                        texts.append(str(summ))
+        top_k = int(getattr(self._cfg, "keywords_per_node", 8) or 8)
+        return extract_keywords(texts, top_k=top_k)
 
 
 def _collect_doc_ids(children: list, into: list[str]) -> None:

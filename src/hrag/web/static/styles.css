@@ -509,6 +509,112 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .bubble hr { border: 0; border-top: 1px solid var(--line); margin: 1em 0; }
 .bubble img { max-width: 100%; border-radius: 8px; }
 
+/* ============================================================
+ * Phase 12 — bilingual typography, math, richer markdown
+ * ============================================================ */
+
+/* A2 — Persian / RTL typography. maybeRTL() sets lang="fa" on RTL content;
+ * these rules give Persian its own font, looser line-height (Persian needs
+ * more vertical air), no Latin letter-spacing, and RTL-correct indentation. */
+.bubble:lang(fa),
+.trace:lang(fa),
+.source-item:lang(fa),
+[lang="fa"] {
+  font-family: var(--font-fa);
+  line-height: 1.95;
+  letter-spacing: 0;
+}
+.bubble:lang(fa) { font-size: 1.02rem; }
+.bubble:lang(fa) ul, .bubble:lang(fa) ol {
+  padding-left: 0; padding-inline-start: 1.6em;
+}
+.bubble:lang(fa) blockquote {
+  border-left: 0; border-inline-start: 2px solid var(--accent);
+  border-radius: 4px 0 0 4px;
+}
+/* Keep code, math, and inline-code left-to-right even inside RTL text. */
+.bubble code, .bubble pre, .katex, .katex-display {
+  direction: ltr; unicode-bidi: isolate;
+}
+
+/* A1 — KaTeX. Display math gets breathing room and scrolls if it overflows. */
+.katex-display { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.katex { font-size: 1.04em; }
+
+/* A4 — callouts (GitHub `> [!NOTE]` style). */
+.bubble blockquote.callout {
+  font-style: normal; border-radius: 8px; padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  background: rgba(255,255,255,0.03); color: var(--ink);
+}
+.bubble .callout-title {
+  font-weight: 700; font-size: 0.82rem; text-transform: uppercase;
+  letter-spacing: 0.04em; margin-bottom: 4px; opacity: 0.95;
+}
+.callout-note    { border-left-color: var(--accent) !important; }
+.callout-tip     { border-left-color: var(--good)   !important; }
+.callout-tip .callout-title    { color: var(--good); }
+.callout-important { border-left-color: #a78bfa !important; }
+.callout-important .callout-title { color: #a78bfa; }
+.callout-warning { border-left-color: var(--warn)  !important; }
+.callout-warning .callout-title { color: var(--warn); }
+.callout-caution { border-left-color: var(--bad)   !important; }
+.callout-caution .callout-title { color: var(--bad); }
+
+/* A4 — code-block language label chip. */
+.bubble pre .code-lang {
+  position: absolute; top: 8px; left: 10px;
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--muted); opacity: 0.7;
+  pointer-events: none;
+}
+.bubble pre:hover .code-lang { opacity: 0.9; }
+
+/* A4 — scrollable table wrapper. */
+.bubble .table-wrap { overflow-x: auto; margin: 0.6em 0; border-radius: 8px; }
+.bubble .table-wrap table { margin: 0; }
+
+/* A4 — inline [n] citation links. */
+.bubble a.cite {
+  display: inline-block; min-width: 1.1em; text-align: center;
+  font-size: 0.78em; font-weight: 600; line-height: 1.3;
+  color: var(--accent); text-decoration: none;
+  padding: 0 3px; border-radius: 4px;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--line);
+  transition: background var(--t-base), color var(--t-base);
+  vertical-align: baseline;
+}
+.bubble a.cite:hover { background: var(--accent); color: #0b0b0d; }
+.source-item.cite-flash {
+  animation: citeFlash 1.2s ease;
+}
+@keyframes citeFlash {
+  0%, 100% { background: transparent; }
+  20% { background: rgba(120,160,255,0.18); }
+}
+
+/* A3 — message-action buttons (copy-md / regenerate / edit). */
+.msg-feedback .fb-spacer { flex: 0 0 8px; }
+.act-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  color: var(--muted); background: transparent;
+  border: 1px solid transparent; border-radius: 7px;
+  cursor: pointer; opacity: 0;
+  transition: opacity var(--t-base), color var(--t-base), background var(--t-base), border-color var(--t-base);
+}
+.msg:hover .act-btn { opacity: 0.75; }
+.act-btn:hover { opacity: 1; color: var(--ink-bright); background: rgba(255,255,255,0.05); border-color: var(--line); }
+
+/* B8 — matched-keyword chips in the taxonomy-descent trace. */
+.d-node.kw-hit { box-shadow: inset 0 0 0 1px var(--good); }
+.dn-kws { display: inline-flex; gap: 3px; margin-left: 4px; flex-wrap: wrap; }
+.dn-kw {
+  font-size: 0.64rem; line-height: 1.4; padding: 0 4px;
+  border-radius: 4px; color: var(--good);
+  background: rgba(120,200,140,0.12); border: 1px solid rgba(120,200,140,0.25);
+}
+
 /* fast streaming text view — plain text, preserves newlines */
 .bubble.streaming-plain {
   white-space: pre-wrap;
@@ -947,8 +1053,10 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
 .app.memories-open #memories-drawer { transform: translateX(0); }
 .app.docs-open #docs-drawer { transform: translateX(0); }
 .app.feedback-open #feedback-drawer { transform: translateX(0); }
+.app.profile-open #profile-drawer { transform: translateX(0); }
 .app.memories-open .drawer-scrim,
 .app.docs-open .drawer-scrim,
+.app.profile-open .drawer-scrim,
 .app.feedback-open .drawer-scrim { opacity: 1; pointer-events: auto; }
 
 .drawer-toolbar {
@@ -1740,6 +1848,7 @@ a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   font-weight: 700;
   margin: 4px 0 8px;
 }
+.fb-export-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 
 .fb-neg-card {
   padding: 10px 12px;
@@ -1943,6 +2052,102 @@ body[data-view="taxonomy"] .app > .main {
   font-weight: 700;
   font-family: var(--mono);
   pointer-events: none;
+}
+/* Phase 12 — keyword line on a node card. */
+.tax-card-kw {
+  fill: var(--good);
+  font-size: 9.5px;
+  font-family: var(--font);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+/* ============================================================
+ * Phase 12 — Knowledge-graph viewer + Profile editor
+ * ============================================================ */
+
+/* Graph page (mirrors .taxonomy-page but keyed on data-view="kg"). */
+.graph-page {
+  position: fixed; inset: 0; z-index: 60;
+  background:
+    radial-gradient(1200px 800px at 20% -10%, rgba(120,160,255,0.05), transparent 60%),
+    radial-gradient(1000px 600px at 110% 110%, rgba(120,160,255,0.04), transparent 60%),
+    var(--bg);
+  color: var(--ink);
+  display: grid; grid-template-rows: 56px 1fr;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--t-base) var(--ease);
+}
+body[data-view="kg"] .graph-page { opacity: 1; pointer-events: auto; }
+
+#kg-svg { width: 100%; height: 100%; display: block; cursor: grab; user-select: none; }
+#kg-svg:active { cursor: grabbing; }
+.kg-link { stroke: var(--line-2); stroke-opacity: 0.5; }
+[data-theme="light"] .kg-link { stroke: rgba(0,0,0,0.2); }
+.kg-node { cursor: pointer; }
+.kg-node circle { fill: var(--accent); stroke: var(--bg); stroke-width: 1.5; transition: fill var(--t-base); }
+.kg-node.kg-passage circle { fill: var(--muted-2); }
+.kg-node:hover circle { fill: var(--good); }
+.kg-node-label {
+  fill: var(--ink); font-size: 10px; font-family: var(--font);
+  pointer-events: none; paint-order: stroke;
+  stroke: var(--bg); stroke-width: 2.5px; stroke-linejoin: round;
+}
+.kg-toolbar-field {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.78rem; color: var(--muted); margin-right: 6px;
+}
+.kg-toolbar-field select {
+  background: var(--bg-2); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 6px; font-size: 0.78rem;
+}
+.kg-tooltip {
+  position: absolute; z-index: 5; pointer-events: none;
+  max-width: 260px; padding: 6px 9px;
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: 8px; font-size: 0.8rem; color: var(--ink);
+  box-shadow: var(--shadow-2);
+}
+.kg-tt-meta { color: var(--muted); font-size: 0.72rem; }
+
+/* Profile editor drawer. */
+.profile-rendered {
+  white-space: pre-wrap; font-size: 0.84rem; color: var(--ink);
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 12px; line-height: 1.6;
+}
+.profile-rendered[hidden] { display: none; }
+.profile-add {
+  display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px;
+  align-items: center;
+}
+.profile-add select, .profile-add input {
+  background: var(--bg-2); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; font-size: 0.82rem; font-family: var(--font);
+}
+.profile-add select { flex: 0 0 auto; }
+.profile-add input { flex: 1 1 120px; min-width: 90px; }
+.profile-section { margin-bottom: 14px; }
+.profile-section-label {
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted-2); font-weight: 700; margin-bottom: 6px;
+}
+.profile-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; margin-bottom: 5px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.profile-row-text { flex: 1 1 auto; font-size: 0.86rem; min-width: 0; word-break: break-word; }
+.profile-row-conf { font-size: 0.72rem; color: var(--muted); font-family: var(--mono); }
+.profile-row-del {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+  background: transparent; border: 0; color: var(--muted); cursor: pointer;
+  font-size: 1rem; line-height: 1;
+}
+.profile-row-del:hover { color: var(--bad); background: rgba(255,90,90,0.12); }
+.profile-suggest {
+  border: 1px dashed var(--accent); border-radius: 8px; padding: 8px;
+  margin-bottom: 14px;
 }
 
 /* ----- edges ----- */
@@ -2167,6 +2372,39 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
   outline: none;
 }
 .tax-pop-desc:focus { border-color: var(--accent); }
+
+/* Phase 12 — node keyword editor in the popover. */
+.tax-pop-kw-label {
+  margin-top: 8px; font-size: 0.72rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+}
+.tax-pop-kw-hint { font-weight: 500; text-transform: none; letter-spacing: 0; opacity: 0.7; }
+.tax-pop-kw-chips {
+  display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0;
+  min-height: 4px;
+}
+.tax-pop-kw-empty { font-size: 0.74rem; color: var(--muted); opacity: 0.7; font-style: italic; }
+.tax-kw-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 4px 1px 8px; font-size: 0.74rem;
+  color: var(--good);
+  background: rgba(120,200,140,0.12); border: 1px solid rgba(120,200,140,0.28);
+  border-radius: 10px;
+}
+.tax-kw-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; padding: 0; line-height: 1;
+  color: var(--good); background: transparent; border: 0;
+  border-radius: 50%; cursor: pointer; font-size: 0.9rem; opacity: 0.7;
+}
+.tax-kw-x:hover { opacity: 1; background: rgba(120,200,140,0.2); }
+.tax-pop-kw-input {
+  width: 100%; padding: 5px 8px; margin-bottom: 4px;
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--ink); font-size: 0.78rem;
+  font-family: var(--font); outline: none;
+}
+.tax-pop-kw-input:focus { border-color: var(--accent); }
 .tax-pop-actions {
   display: flex; gap: 6px;
   margin-top: 8px;

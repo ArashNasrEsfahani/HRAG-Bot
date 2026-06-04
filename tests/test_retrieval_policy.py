@@ -37,8 +37,15 @@ def policy(cfg: IntentConfig) -> RetrievalPolicy:
             RetrievalPlan(scope="none", top_k_override=None, source_types=None),
         ),
         (
+            # PERSONAL searches BOTH documents and episodic memory (so uploaded
+            # CVs / notes are found for "find my master GPA"), at its own
+            # configured retrieve depth (cfg.personal_top_k, =3 in the fixture).
             Intent.PERSONAL,
-            RetrievalPlan(scope="episodic", top_k_override=3, source_types=["episodic"]),
+            RetrievalPlan(
+                scope="full",
+                top_k_override=3,
+                source_types=["document", "episodic"],
+            ),
         ),
         (
             Intent.FACTUAL,
@@ -71,10 +78,10 @@ def test_personal_top_k_is_configurable() -> None:
     assert p.plan(Intent.PERSONAL).top_k_override == 10
 
 
-def test_personal_top_k_default_is_3() -> None:
-    """Default IntentConfig.personal_top_k must be 3 per spec."""
+def test_personal_top_k_default_matches_config_default() -> None:
+    """The PERSONAL override tracks IntentConfig.personal_top_k's default."""
     p = RetrievalPolicy(IntentConfig())
-    assert p.plan(Intent.PERSONAL).top_k_override == 3
+    assert p.plan(Intent.PERSONAL).top_k_override == IntentConfig().personal_top_k
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +89,13 @@ def test_personal_top_k_default_is_3() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_personal_source_types_is_episodic_list(policy: RetrievalPolicy) -> None:
+def test_personal_source_types_spans_documents_and_episodic(
+    policy: RetrievalPolicy,
+) -> None:
+    """PERSONAL searches uploaded documents AND saved memories — not episodic
+    alone (that regressed lookups of facts stored in uploaded files)."""
     plan = policy.plan(Intent.PERSONAL)
-    assert plan.source_types == ["episodic"]
+    assert plan.source_types == ["document", "episodic"]
 
 
 @pytest.mark.parametrize(
@@ -110,7 +121,7 @@ def test_non_personal_source_types_is_none(
     "intent, expected_scope",
     [
         (Intent.GREETING, "none"),
-        (Intent.PERSONAL, "episodic"),
+        (Intent.PERSONAL, "full"),
         (Intent.FACTUAL,  "full"),
         (Intent.GENERAL,  "none"),
         (Intent.UNCLEAR,  "ask_clarify"),

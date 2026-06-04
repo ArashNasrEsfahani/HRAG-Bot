@@ -338,6 +338,9 @@ def cmd_taxonomy_show(user: Optional[str]) -> None:
                 f"[bold]{node.label}[/bold] "
                 f"[dim](docs={node.doc_count}, id={node.node_id[:10]})[/dim]"
             )
+            if getattr(node, "keywords", None):
+                kw_preview = ", ".join(node.keywords[:6])
+                label_text += f"\n    [cyan dim]kw:[/cyan dim] [dim]{kw_preview}[/dim]"
             if node.is_leaf and node.doc_count:
                 docs = orch.taxonomy_store.get_docs_at(node.node_id)[:4]
                 doc_titles = []
@@ -361,6 +364,116 @@ def cmd_taxonomy_show(user: Optional[str]) -> None:
         orch.close()
     except Exception as exc:
         console.print(f"[red]Error:[/red] {exc}")
+        sys.exit(1)
+
+
+@cmd_taxonomy.command("keywords")
+@click.option("--user", "-u", default=None, help="User ID (defaults to config value).")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Regenerate keywords for every node, overwriting existing ones.",
+)
+def cmd_taxonomy_keywords(user: Optional[str], force: bool) -> None:
+    """Backfill per-node keywords for hybrid (dense + keyword) routing.
+
+    Generates keywords locally (no LLM) from each node's label, description,
+    and member document summaries, then persists them. Run this once on an
+    existing tree to enable keyword routing without a full rebuild.
+    """
+    try:
+        cfg = load_config()
+        orch = Orchestrator(cfg)
+        user_id = user or cfg.user.default_user_id
+        if orch.taxonomy_store is None:
+            console.print("[red]Error:[/red] taxonomy disabled — set taxonomy.enabled=true.")
+            sys.exit(1)
+
+        store = orch.taxonomy_store
+        nodes = store.list_nodes(user_id)
+        # Skip the synthetic root (parent_id is None).
+        targets = [n for n in nodes if n.parent_id is not None]
+        if not targets:
+            console.print("[dim]No taxonomy yet. Run `hrag taxonomy build` first.[/dim]")
+            orch.close()
+            return
+
+        from hrag.taxonomy.keywords import extract_keywords  # noqa: PLC0415
+        from rich.progress import (  # noqa: PLC0415
+            BarColumn,
+            MofNCompleteColumn,
+            Progress,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        top_k = int(getattr(cfg.taxonomy, "keywords_per_node", 8) or 8)
+
+        def _leaf_summaries(node_id: str) -> list[str]:
+            doc_ids = store.get_docs_at(node_id)
+            if not doc_ids:
+                return []
+            placeholders = ",".join("?" * len(doc_ids))
+            rows = orch.db.execute(
+                f"SELECT m.summary AS summary, d.title AS title "
+                f"FROM documents d "
+                f"LEFT JOIN kg_taxonomy_doc_meta m "
+                f"  ON m.doc_id = d.doc_id AND m.user_id = d.user_id "
+                f"WHERE d.doc_id IN ({placeholders})",
+                doc_ids,
+            ).fetchall()
+            return [(r["summary"] or r["title"] or "") for r in rows if (r["summary"] or r["title"])]
+
+        # Children lookup so internal nodes can borrow their children's labels.
+        children_of: dict[str, list] = {}
+        for n in nodes:
+            if n.parent_id is not None:
+                children_of.setdefault(n.parent_id, []).append(n)
+
+        updated = 0
+        skipped = 0
+        with Progress(
+            TextColumn("[bold]taxonomy[/bold] keywords"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("•"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as bar:
+            task = bar.add_task("nodes", total=len(targets))
+            for node in targets:
+                bar.advance(task)
+                if node.keywords and not force:
+                    skipped += 1
+                    continue
+                texts: list[str] = [node.label]
+                if node.description:
+                    texts.append(node.description)
+                if node.is_leaf:
+                    texts.extend(_leaf_summaries(node.node_id))
+                else:
+                    for ch in children_of.get(node.node_id, []):
+                        texts.append(ch.label)
+                        if ch.keywords:
+                            texts.append(" ".join(ch.keywords))
+                kws = extract_keywords(texts, top_k=top_k)
+                if kws:
+                    store.set_node_keywords(user_id, node.node_id, kws)
+                    updated += 1
+                print(f"[{updated + skipped}/{len(targets)}] {node.label[:50]} -> "
+                      f"{', '.join(kws[:5])}", flush=True)
+
+        console.print(
+            f"[green]Done.[/green] {updated} nodes keyworded, {skipped} kept "
+            f"(use --force to overwrite)."
+        )
+        orch.close()
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        import traceback  # noqa: PLC0415
+
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -1932,71 +2045,7 @@ def cmd_export_training_pairs(out: str, user: Optional[str], min_rating: int) ->
 
 
 # ---------------------------------------------------------------------------
-# gui
-# ---------------------------------------------------------------------------
-
-
-@cli.command("gui")
-@click.option("--host", default="localhost", help="Bind address.")
-@click.option("--port", default=8501, type=int, help="Port to serve on.")
-@click.option(
-    "--browser/--no-browser",
-    default=True,
-    help="Auto-open the browser when the server is ready.",
-)
-def cmd_gui(host: str, port: int, browser: bool) -> None:
-    """Launch the Streamlit dashboard.
-
-    Requires the ``gui`` optional dependencies: ``pip install -e .[gui]``.
-    Shells out to ``streamlit run`` because Streamlit must own the process.
-    """
-    import shutil  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-
-    try:
-        import streamlit  # noqa: F401, PLC0415
-    except ImportError:
-        console.print(
-            "[red]Streamlit is not installed.[/red]\n"
-            "Install the GUI extras: [bold]pip install -e .[gui][/bold]"
-        )
-        sys.exit(1)
-
-    streamlit_bin = shutil.which("streamlit")
-    if streamlit_bin is None:
-        console.print(
-            "[red]Could not locate the 'streamlit' executable on PATH.[/red]\n"
-            "Try running [bold]python -m streamlit run <app>[/bold] manually."
-        )
-        sys.exit(1)
-
-    app_path = Path(__file__).parent / "gui" / "app.py"
-    if not app_path.exists():
-        console.print(f"[red]GUI app missing at {app_path}[/red]")
-        sys.exit(1)
-
-    cmd = [
-        streamlit_bin,
-        "run",
-        str(app_path),
-        "--server.address",
-        host,
-        "--server.port",
-        str(port),
-        "--server.headless",
-        "false" if browser else "true",
-        "--browser.gatherUsageStats",
-        "false",
-    ]
-    console.print(f"[dim]launching:[/dim] {' '.join(cmd)}")
-    try:
-        subprocess.run(cmd, check=False)
-    except KeyboardInterrupt:
-        console.print("[dim]GUI stopped.[/dim]")
-
-
-# ---------------------------------------------------------------------------
-# web — Claude/ChatGPT-style FastAPI SPA (replaces Streamlit)
+# web / gui — FastAPI SPA (Claude/ChatGPT-style)
 # ---------------------------------------------------------------------------
 
 
@@ -2008,9 +2057,8 @@ def cmd_gui(host: str, port: int, browser: bool) -> None:
 def cmd_web(host: str, port: int, reload: bool, browser: bool) -> None:
     """Launch the FastAPI-backed web chat UI.
 
-    Replaces the legacy Streamlit GUI with a hand-crafted SPA modelled on
-    claude.ai / ChatGPT. Streams tokens over SSE; supports markdown, code,
-    sources, sessions, and live settings.
+    Hand-crafted SPA modelled on claude.ai / ChatGPT. Streams tokens over
+    SSE; supports markdown, code, sources, sessions, and live settings.
     """
     try:
         import uvicorn  # noqa: PLC0415

@@ -59,7 +59,9 @@ class RetrievalPolicy:
 
         Routing table:
         - ``GREETING``  → scope ``"none"`` (no retrieval; canned response)
-        - ``PERSONAL``  → scope ``"episodic"`` (episodic memory only, limited k)
+        - ``PERSONAL``  → scope ``"full"`` over documents + episodic, with
+                          ``top_k_override = cfg.personal_top_k`` (its own
+                          retrieve depth, distinct from the global default)
         - ``FACTUAL``   → scope ``"full"`` (normal retrieval pipeline)
         - ``GENERAL``   → scope ``"none"`` (substantive but off-corpus; answer
                           from LLM general knowledge, no retrieval)
@@ -80,7 +82,7 @@ class RetrievalPolicy:
             # surface a relevant document chunk when memories also match.
             return RetrievalPlan(
                 scope="full",
-                top_k_override=None,          # use global top_k_vector
+                top_k_override=self._cfg.personal_top_k,
                 source_types=["document", "episodic"],
             )
         if intent == Intent.FACTUAL:

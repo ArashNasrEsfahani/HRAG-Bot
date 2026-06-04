@@ -29,6 +29,28 @@ function renderMD(src, { withHighlight = false } = {}) {
   }
 }
 
+// KaTeX math typesetting. Runs on the LIVE DOM node AFTER the sanitized
+// markdown HTML is assigned (KaTeX mutates the element in place, so it must
+// see real nodes, not an HTML string). Called only on completed messages —
+// never mid-stream — to keep streaming cheap. No-op until KaTeX has loaded
+// (its scripts are `defer`red) and silently ignores malformed math.
+function renderMath(el) {
+  if (!el || typeof window.renderMathInElement !== 'function') return;
+  try {
+    window.renderMathInElement(el, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '\\(', right: '\\)', display: false },
+        { left: '$', right: '$', display: false },
+      ],
+      // auto-render already skips <code>/<pre>; add a couple more for safety.
+      ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code', 'option'],
+      throwOnError: false,
+    });
+  } catch (e) { /* malformed math — leave the source text as-is */ }
+}
+
 // ChatGPT-style incremental markdown render during SSE streaming.
 // Debounced to ~33ms so we never re-parse more than ~30 times/sec even
 // when tokens arrive in a fast burst. Renders go through the same
@@ -93,6 +115,113 @@ function attachCopyButtons(root) {
       } catch { btn.textContent = 'failed'; }
     });
     pre.appendChild(btn);
+  }
+}
+
+// Map a GitHub-style `[!NOTE]` blockquote to a styled callout.
+const _CALLOUT_KINDS = { note: 'note', tip: 'tip', important: 'important', warning: 'warning', caution: 'caution', danger: 'caution' };
+
+function enhanceCallouts(root) {
+  for (const bq of root.querySelectorAll('blockquote')) {
+    const first = bq.querySelector('p');
+    if (!first) continue;
+    const m = (first.textContent || '').match(/^\s*\[!(\w+)\]\s*/i);
+    if (!m) continue;
+    const kind = _CALLOUT_KINDS[m[1].toLowerCase()];
+    if (!kind) continue;
+    bq.classList.add('callout', `callout-${kind}`);
+    // Strip the "[!NOTE]" marker text from the first paragraph.
+    first.innerHTML = first.innerHTML.replace(/^\s*\[!\w+\]\s*/i, '');
+    const title = document.createElement('div');
+    title.className = 'callout-title';
+    title.textContent = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+    bq.insertBefore(title, bq.firstChild);
+  }
+}
+
+// Add a language label chip to fenced code blocks (from hljs `language-xxx`).
+function enhanceCodeBlocks(root) {
+  for (const pre of root.querySelectorAll('pre')) {
+    const code = pre.querySelector('code');
+    if (!code || pre.querySelector('.code-lang')) continue;
+    const cls = [...code.classList].find(c => c.startsWith('language-'));
+    const lang = cls ? cls.slice('language-'.length) : '';
+    if (!lang || lang === 'undefined') continue;
+    const chip = document.createElement('span');
+    chip.className = 'code-lang';
+    chip.textContent = lang;
+    pre.appendChild(chip);
+  }
+}
+
+// Wrap wide tables in a horizontal scroll container so they never overflow.
+function wrapTables(root) {
+  for (const table of root.querySelectorAll('table')) {
+    if (table.parentElement && table.parentElement.classList.contains('table-wrap')) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    table.parentNode.insertBefore(wrap, table);
+    wrap.appendChild(table);
+  }
+}
+
+// One pass over a finished assistant bubble: copy buttons, callouts, code
+// labels, table wrappers, then math typesetting (last, so it sees final DOM).
+function decorateBubble(el) {
+  if (!el) return;
+  attachCopyButtons(el);
+  enhanceCallouts(el);
+  enhanceCodeBlocks(el);
+  wrapTables(el);
+  renderMath(el);
+}
+
+// Turn inline `[n]` citation markers into clickable links that scroll to the
+// matching source card. No-op when there are no sources. Walks text nodes so
+// we never touch code/pre or re-wrap existing anchors.
+function linkCitations(bubble, sourcesEl) {
+  if (!bubble || !sourcesEl) return;
+  const items = sourcesEl.querySelectorAll('.source-item');
+  if (!items.length) return;
+  const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const p = node.parentElement;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      if (p.closest('pre, code, a, .katex')) return NodeFilter.FILTER_REJECT;
+      return /\[\d{1,2}\]/.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const targets = [];
+  let n;
+  while ((n = walker.nextNode())) targets.push(n);
+  for (const node of targets) {
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    const text = node.nodeValue;
+    const re = /\[(\d{1,2})\]/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const idx = parseInt(m[1], 10);
+      if (idx < 1 || idx > items.length) continue;
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const a = document.createElement('a');
+      a.className = 'cite';
+      a.textContent = m[0];
+      a.href = '#';
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        const card = items[idx - 1];
+        const det = sourcesEl.tagName === 'DETAILS' ? sourcesEl : sourcesEl.querySelector('details');
+        if (det) det.open = true;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.add('cite-flash');
+        setTimeout(() => card.classList.remove('cite-flash'), 1200);
+      });
+      frag.appendChild(a);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag, node);
   }
 }
 
@@ -162,6 +291,7 @@ const cfgThink = $('cfg-think');
 const cfgRetriever = $('cfg-retriever');
 const cfgReranker = $('cfg-reranker');
 const cfgRerankEnabled = $('cfg-rerank-enabled');
+const cfgReflectionMode = $('cfg-reflection-mode');
 const cfgGate = $('cfg-gate');
 const cfgClue = $('cfg-clue');
 const cfgMst = $('cfg-mst');
@@ -352,6 +482,17 @@ initTheme();
   if (refreshFeedbackBtn) {
     refreshFeedbackBtn.addEventListener('click', () => loadFeedbackStats());
   }
+  // Feedback export buttons → download JSONL.
+  const _fbDownload = (rating) => {
+    const a = document.createElement('a');
+    a.href = `/api/feedback/export?rating=${encodeURIComponent(rating)}`;
+    a.download = `hrag_feedback_${rating}.jsonl`;
+    document.body.appendChild(a); a.click(); a.remove();
+    flashToast(`exporting ${rating} feedback…`);
+  };
+  $('fb-export-all')?.addEventListener('click', () => _fbDownload('all'));
+  $('fb-export-up')?.addEventListener('click', () => _fbDownload('up'));
+  $('fb-export-down')?.addEventListener('click', () => _fbDownload('down'));
 
   // Upload zone wiring
   if (uploadZoneEl) {
@@ -476,6 +617,10 @@ initTheme();
     flashToast(`reranker → ${cfgReranker.value}`);
   });
   cfgRerankEnabled.addEventListener('change', () => patchConfig({ rerank_enabled: cfgRerankEnabled.checked }));
+  cfgReflectionMode.addEventListener('change', async () => {
+    await patchConfig({ reflection_mode: cfgReflectionMode.value });
+    flashToast(`reflection → ${cfgReflectionMode.value}`);
+  });
   cfgGate.addEventListener('change', () => patchConfig({ gate_enabled: cfgGate.checked }));
   cfgClue.addEventListener('change', () => patchConfig({ clue_enabled: cfgClue.checked }));
   cfgMst.addEventListener('change', () => patchConfig({ dialog_mst_enabled: cfgMst.checked }));
@@ -692,6 +837,7 @@ function paintConfig(c) {
   if (c.llm.num_ctx != null) cfgNumCtx.value = String(c.llm.num_ctx);
   cfgThink.checked = !!c.llm.think;
   cfgRetriever.value = c.retrieval.retriever;
+  if (c.retrieval.reflection_mode) cfgReflectionMode.value = c.retrieval.reflection_mode;
   cfgReranker.value = c.retrieval.reranker;
   cfgRerankEnabled.checked = !!c.retrieval.rerank_enabled;
   cfgGate.checked = !!c.compaction.gate_enabled;
@@ -1155,8 +1301,9 @@ function appendMessage(role, content, messageId = null) {
     bubble.textContent = content;
     maybeRTL(bubble, content);
   } else {
+    bubble._rawText = content;
     bubble.innerHTML = renderMD(content, { withHighlight: true });
-    attachCopyButtons(bubble);
+    decorateBubble(bubble);
     maybeRTL(bubble, content);
     wrap.appendChild(head);
     wrap.appendChild(bubble);
@@ -1218,8 +1365,64 @@ function buildFeedbackBar(messageId = null) {
     postFeedback(isActive ? 0 : -1);
   });
 
+  // ----- Phase 12: message actions ------------------------------------
+  function precedingUserText() {
+    let el = bar.closest('.msg')?.previousElementSibling;
+    while (el && !(el.classList?.contains('msg') && el.classList?.contains('user'))) {
+      el = el.previousElementSibling;
+    }
+    return el ? (el.querySelector('.bubble')?.textContent || '') : '';
+  }
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'act-btn';
+  copyBtn.type = 'button';
+  copyBtn.title = 'Copy as Markdown';
+  copyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  copyBtn.addEventListener('click', async () => {
+    const md = bar.closest('.msg')?.querySelector('.bubble')?._rawText || '';
+    try {
+      await navigator.clipboard.writeText(md);
+      flashToast('Copied as Markdown');
+    } catch { flashToast('copy failed'); }
+  });
+
+  const regenBtn = document.createElement('button');
+  regenBtn.className = 'act-btn';
+  regenBtn.type = 'button';
+  regenBtn.title = 'Regenerate answer';
+  regenBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+  regenBtn.addEventListener('click', () => {
+    if (state.streaming) { flashToast('still streaming…'); return; }
+    const q = precedingUserText();
+    if (!q) { flashToast('no question to regenerate'); return; }
+    inputEl.value = q;
+    autoResize();
+    submit();
+  });
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'act-btn';
+  editBtn.type = 'button';
+  editBtn.title = 'Edit & resend';
+  editBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>';
+  editBtn.addEventListener('click', () => {
+    const q = precedingUserText();
+    if (!q) { flashToast('no question to edit'); return; }
+    inputEl.value = q;
+    autoResize();
+    inputEl.focus();
+    inputEl.setSelectionRange(q.length, q.length);
+  });
+
   bar.appendChild(upBtn);
   bar.appendChild(downBtn);
+  const spacer = document.createElement('span');
+  spacer.className = 'fb-spacer';
+  bar.appendChild(spacer);
+  bar.appendChild(copyBtn);
+  bar.appendChild(regenBtn);
+  bar.appendChild(editBtn);
   bar._applyRating = applyRating;
   return bar;
 }
@@ -1438,15 +1641,30 @@ function renderDescend(d) {
     html += `<div class="d-level">
       <div class="d-level-label">L${i}</div>
       <div class="d-nodes">`;
-    const nodes = [...(level.kept || []), ...(level.pruned || [])];
+    // describe_last_descend emits `considered` with a per-node `kept` flag;
+    // tolerate an older kept/pruned shape too.
+    const nodes = (level.considered && level.considered.length)
+      ? level.considered.slice()
+      : [...(level.kept || []), ...(level.pruned || [])];
     nodes.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
     for (const n of nodes) {
-      const isKept = (level.kept || []).some(k => k.node?.node_id === n.node?.node_id);
+      const isKept = (n.kept !== undefined)
+        ? !!n.kept
+        : (level.kept || []).some(k => (k.node?.node_id || k.node_id) === (n.node?.node_id || n.node_id));
       const label = n.node?.label || n.label || '(unnamed)';
       const score = (n.score ?? 0).toFixed(2);
-      html += `<span class="d-node ${isKept ? 'kept' : 'pruned'}" title="${escapeHTML(label)}">
+      // Phase 12 — matched-keyword chips when hybrid routing contributed.
+      const kwScore = n.keyword_score ?? n.node?.keyword_score ?? 0;
+      const kws = n.keywords || n.node?.keywords || [];
+      let kwHtml = '';
+      if (kwScore > 0 && kws.length) {
+        const chips = kws.slice(0, 4).map(k => `<span class="dn-kw">${escapeHTML(k)}</span>`).join('');
+        kwHtml = `<span class="dn-kws" title="keyword match +${kwScore.toFixed(2)}">${chips}</span>`;
+      }
+      html += `<span class="d-node ${isKept ? 'kept' : 'pruned'}${kwScore > 0 ? ' kw-hit' : ''}" title="${escapeHTML(label)}">
         <span class="dn-label">${escapeHTML(label)}</span>
         <span class="dn-score">${score}</span>
+        ${kwHtml}
       </span>`;
     }
     html += `</div></div>`;
@@ -1639,7 +1857,7 @@ function handleSSE(chunk, els) {
       els.bubble.classList.remove('streaming-plain', 'cursor');
       els.bubble._textNode = null;
       els.bubble.innerHTML = renderMD(els.bubble._rawText, { withHighlight: true });
-      attachCopyButtons(els.bubble);
+      decorateBubble(els.bubble);
       maybeRTL(els.bubble, els.bubble._rawText);
       setPhase(els, 'done', 'done');
       // Store the message_id on the wrap so the feedback bar can POST it.
@@ -1648,7 +1866,11 @@ function handleSSE(chunk, els) {
       }
       // sources
       if (final.sources && final.sources.length) {
-        els.wrap.appendChild(renderSources(final.sources));
+        const sourcesEl = renderSources(final.sources);
+        els.wrap.appendChild(sourcesEl);
+        renderMath(sourcesEl);
+        // Wire inline [n] citation markers in the bubble to the source list.
+        linkCitations(els.bubble, sourcesEl);
       }
       if (final.session_id) state.sessionId = final.session_id;
       scrollToEnd(false);
@@ -2899,12 +3121,31 @@ const _jobs = new Map();  // job_id → state object
 const _jobPolling = new Set();  // re-entrancy guard
 const _jobAnchor = () => document.getElementById('job-drawer');
 
-const JOB_STAGES = ['load', 'chunk', 'filter', 'embed', 'index', 'assign'];
+const JOB_STAGES = ['load', 'chunk', 'filter', 'contextual', 'embed', 'index', 'extract', 'assign'];
 const JOB_STAGE_LABELS = {
   load: 'Load', chunk: 'Chunk', filter: 'Filter',
-  embed: 'Embed', index: 'Index', assign: 'Assign',
+  contextual: 'Context', embed: 'Embed', index: 'Index',
+  extract: 'KG', assign: 'Assign',
 };
 const MEMORY_STAGES = ['embed', 'index'];
+
+// Some pipeline stages fire multiple raw event names (per-chunk granularity,
+// start/done markers). Fold those onto the canonical JOB_STAGES key so the
+// progress bar and stage chips track a single, stable stage rather than
+// flickering between event variants.
+const JOB_STAGE_ALIAS = {
+  contextual_augment_start: 'contextual',
+  contextual_augment_chunk: 'contextual',
+  contextual_augment_done: 'contextual',
+  kg_extract: 'extract',
+  kg_extract_start: 'extract',
+  kg_extract_done: 'extract',
+  kg_dedup_hit: 'extract',
+};
+function canonicalStage(raw) {
+  if (!raw) return raw;
+  return JOB_STAGE_ALIAS[raw] || raw;
+}
 
 function trackJob(jobId, kind, label, file) {
   if (!jobId) return;
@@ -2982,8 +3223,25 @@ function applyJobUpdate(jobId, data) {
   }
   if (parsed && typeof parsed === 'object') {
     j.result = parsed;
-    j.stages = parsed.stages || {};
-    j.current_stage = parsed.current_stage || j.current_stage;
+    // Normalize raw event-name keys onto canonical stages so the UI tracks
+    // one stable stage per pipeline phase. Without this, e.g.
+    // "contextual_augment_chunk" and "contextual_augment_done" each create
+    // separate entries that never advance the progress bar coherently.
+    const rawStages = parsed.stages || {};
+    const folded = {};
+    for (const k of Object.keys(rawStages)) {
+      const target = canonicalStage(k);
+      const incoming = rawStages[k];
+      const prev = folded[target];
+      // Last-writer-wins per canonical stage, but pick the entry with the
+      // latest last_ts so the "active" snapshot reflects the most recent
+      // emission (per-chunk events for contextual/extract arrive in order).
+      if (!prev || (incoming.last_ts || 0) >= (prev.last_ts || 0)) {
+        folded[target] = { ...incoming, stage: target };
+      }
+    }
+    j.stages = folded;
+    j.current_stage = canonicalStage(parsed.current_stage) || j.current_stage;
     j.files = parsed.files || [];
     j.errors = parsed.errors || [];
   }
@@ -3028,26 +3286,44 @@ function renderJobs() {
   // Newest first; keep up to 5 visible, fold the rest behind a count badge.
   const ids = Array.from(_jobs.keys()).reverse();
   const visibleIds = ids.slice(0, 5);
+  const visibleSet = new Set(visibleIds);
   const hiddenCount = ids.length - visibleIds.length;
 
-  // Index existing children by jobId so we can reuse them and avoid layout
-  // thrash on every poll.
-  const existing = new Map();
+  // Pass 1 — remove stale children: cards whose jobs no longer exist or are
+  // no longer in the top-5, plus any old +N footer. We intentionally do NOT
+  // touch the cards that survive; detaching and re-attaching them every
+  // 250 ms restarts CSS transitions (progress bar width, active-chip pulse)
+  // and is what makes the drawer flicker.
   for (const el of Array.from(drawer.children)) {
     const id = el.dataset && el.dataset.jobId;
-    if (id) existing.set(id, el);
+    if (!id || !visibleSet.has(id)) {
+      el.remove();
+    }
   }
-  drawer.innerHTML = '';
-  for (const id of visibleIds) {
+
+  // Pass 2 — ensure every visible job has a card, in the right slot. Reuse
+  // surviving cards in place and only move when the ordering actually changed.
+  const surviving = new Map();
+  for (const el of Array.from(drawer.children)) {
+    if (el.dataset && el.dataset.jobId) surviving.set(el.dataset.jobId, el);
+  }
+  for (let i = 0; i < visibleIds.length; i++) {
+    const id = visibleIds[i];
     const j = _jobs.get(id);
-    let card = existing.get(id);
-    if (!card || !card.classList.contains('job-card')) {
+    let card = surviving.get(id);
+    if (!card) {
       card = buildJobCard(id, j);
     } else {
       updateJobCard(card, id, j);
     }
-    drawer.appendChild(card);
+    // Position-aware insertion: if the right node is already at index i, no-op.
+    const at = drawer.children[i];
+    if (at !== card) {
+      drawer.insertBefore(card, at || null);
+    }
   }
+
+  // Pass 3 — collapsed-count footer. Cheap to rebuild; lives at the tail.
   if (hiddenCount > 0) {
     const more = document.createElement('div');
     more.className = 'job-drawer-collapsed';
@@ -3116,45 +3392,61 @@ function buildJobCard(jobId, j) {
 }
 
 function updateJobCard(card, jobId, j) {
-  card.dataset.status = j.status;
+  // dataset writes that don't change values are still no-ops in the layout
+  // engine, so set them unconditionally — cheap and stable.
+  if (card.dataset.status !== j.status) card.dataset.status = j.status;
   const stages = _jobStagesFor(j);
 
-  // Title + meta line.
+  // Title + meta line. textContent assigns only re-paint when the string
+  // actually differs, so don't bother with manual diffing here.
   const nameEl = card.querySelector('.job-card-name');
   const fname = (j.files && j.files[0] && j.files[0].name) || j.label || j.kind;
-  nameEl.textContent = fname;
-  nameEl.title = fname;
-  card.querySelector('.job-card-meta').textContent = formatJobMeta(j);
+  if (nameEl.textContent !== fname) {
+    nameEl.textContent = fname;
+    nameEl.title = fname;
+  }
+  const metaEl = card.querySelector('.job-card-meta');
+  const metaText = formatJobMeta(j);
+  if (metaEl.textContent !== metaText) metaEl.textContent = metaText;
 
   // Cancel/dismiss label.
   const cancelBtn = card.querySelector('.job-card-cancel');
-  if (j.status === 'done' || j.status === 'failed' || j.status === 'cancelled') {
-    cancelBtn.textContent = '×';
-    cancelBtn.title = 'Dismiss';
-  } else {
-    cancelBtn.textContent = '✕';
-    cancelBtn.title = 'Cancel';
+  const isTerminal = (j.status === 'done' || j.status === 'failed' || j.status === 'cancelled');
+  const wantSymbol = isTerminal ? '×' : '✕';
+  if (cancelBtn.textContent !== wantSymbol) {
+    cancelBtn.textContent = wantSymbol;
+    cancelBtn.title = isTerminal ? 'Dismiss' : 'Cancel';
   }
 
-  // Stage chips.
+  // Stage chips — build once, update only className per poll. Rebuilding the
+  // chip DOM on every 250 ms tick restarts the .active pulse animation and
+  // the row's CSS transitions, which is what made the drawer flicker.
   const stagesEl = card.querySelector('.job-card-stages');
-  stagesEl.innerHTML = '';
-  for (const s of stages) {
-    const chip = document.createElement('div');
-    chip.className = 'job-stage';
-    chip.dataset.stage = s;
-    chip.textContent = JOB_STAGE_LABELS[s] || s;
-    const data = j.stages[s];
-    if (j.errors && j.errors.length && j.current_stage === s) {
-      chip.classList.add('failed');
-    } else if (data && data.ts_end && data.n_done >= data.n_total) {
-      chip.classList.add('done');
-    } else if (j.current_stage === s) {
-      chip.classList.add('active');
-    } else {
-      chip.classList.add('pending');
+  let chipMap = card._chipMap;
+  if (!chipMap || chipMap.size !== stages.length) {
+    stagesEl.innerHTML = '';
+    chipMap = new Map();
+    for (const s of stages) {
+      const chip = document.createElement('div');
+      chip.className = 'job-stage pending';
+      chip.dataset.stage = s;
+      chip.textContent = JOB_STAGE_LABELS[s] || s;
+      stagesEl.appendChild(chip);
+      chipMap.set(s, chip);
     }
-    stagesEl.appendChild(chip);
+    card._chipMap = chipMap;
+  }
+  for (const s of stages) {
+    const chip = chipMap.get(s);
+    if (!chip) continue;
+    const data = j.stages[s];
+    let cls;
+    if (j.errors && j.errors.length && j.current_stage === s) cls = 'failed';
+    else if (data && data.ts_end && data.n_done >= data.n_total) cls = 'done';
+    else if (j.current_stage === s) cls = 'active';
+    else cls = 'pending';
+    const want = 'job-stage ' + cls;
+    if (chip.className !== want) chip.className = want;
   }
 
   // Two-layer progress bar.
@@ -3711,6 +4003,9 @@ const taxPopAdd = $('tax-pop-add');
 const taxPopDel = $('tax-pop-del');
 const taxPopDocs = $('tax-pop-docs');
 const taxPopDocCount = $('tax-pop-doc-count');
+const taxPopKwChips = $('tax-pop-kw-chips');
+const taxPopKwInput = $('tax-pop-kw-input');
+const taxKeywordsBtn = $('tax-keywords-btn');
 
 // Modal refs
 const taxModalScrim = $('tax-modal-scrim');
@@ -3977,7 +4272,13 @@ function renderTaxonomy(rootData) {
   nodeEnter.append('text')
     .attr('class', 'tax-card-sub')
     .attr('x', 14)
-    .attr('y', 42);
+    .attr('y', 40);
+
+  // Phase 12 — keyword line (hybrid routing). Empty when a node has none.
+  nodeEnter.append('text')
+    .attr('class', 'tax-card-kw')
+    .attr('x', 14)
+    .attr('y', 51);
 
   nodeEnter.append('g')
     .attr('class', 'tax-card-badge')
@@ -4011,6 +4312,9 @@ function renderTaxonomy(rootData) {
     });
   merged.select('g.tax-card-badge text.tax-badge-text')
     .text(d => String(d.data.doc_count ?? 0));
+  merged.select('text.tax-card-kw')
+    .text(d => _kwLineText(d.data.keywords))
+    .classed('has-kw', d => Array.isArray(d.data.keywords) && d.data.keywords.length > 0);
 
   // Interactions
   merged.on('click', (ev, d) => {
@@ -4040,6 +4344,23 @@ function truncateText(s, n) {
   s = String(s ?? '');
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + '…';
+}
+
+// Phase 12 — the keyword line shown on a taxonomy node card.
+function _kwLineText(keywords) {
+  if (!Array.isArray(keywords) || !keywords.length) return '';
+  const shown = keywords.slice(0, 3).join(' · ');
+  const extra = keywords.length > 3 ? ` +${keywords.length - 3}` : '';
+  return truncateText('🏷 ' + shown + extra, 30);
+}
+
+// Update a live SVG card's keyword line after an in-place edit.
+function updateNodeKeywordBadge(cardEl, keywords) {
+  if (!cardEl) return;
+  const t = cardEl.querySelector('text.tax-card-kw');
+  if (!t) return;
+  t.textContent = _kwLineText(keywords);
+  t.classList.toggle('has-kw', Array.isArray(keywords) && keywords.length > 0);
 }
 
 // ---- drag-and-drop reparent ----
@@ -4162,11 +4483,15 @@ function pointerNodeUnder(srcEvent) {
 let _popoverNodeId = null;
 let _popoverDocs = [];
 
+let _popoverKeywords = [];
+
 async function openNodePopover(node) {
   _popoverNodeId = node.data.id;
   taxState.selectedId = _popoverNodeId;
   taxPopLabel.value = node.data.label || '';
   taxPopDesc.value = node.data.description || '';
+  _popoverKeywords = Array.isArray(node.data.keywords) ? node.data.keywords.slice() : [];
+  renderPopoverKeywords();
   // Position popover near the node card
   positionPopover(node);
   taxPopover.hidden = false;
@@ -4183,6 +4508,81 @@ async function openNodePopover(node) {
     taxPopDocs.innerHTML = `<div class="tax-pop-empty">failed: ${escapeHTML(e.message)}</div>`;
     taxPopDocCount.textContent = '(0)';
   }
+}
+
+// ---- node keyword editor (Phase 12) ----
+function renderPopoverKeywords() {
+  if (!taxPopKwChips) return;
+  taxPopKwChips.innerHTML = '';
+  if (!_popoverKeywords.length) {
+    const empty = document.createElement('span');
+    empty.className = 'tax-pop-kw-empty';
+    empty.textContent = 'none yet — type below or use the Keywords button';
+    taxPopKwChips.appendChild(empty);
+    return;
+  }
+  _popoverKeywords.forEach((kw, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'tax-kw-chip';
+    chip.setAttribute('dir', 'auto');
+    const txt = document.createElement('span');
+    txt.textContent = kw;
+    chip.appendChild(txt);
+    const x = document.createElement('button');
+    x.className = 'tax-kw-x';
+    x.type = 'button';
+    x.textContent = '×';
+    x.title = 'Remove';
+    x.addEventListener('click', () => {
+      _popoverKeywords.splice(i, 1);
+      renderPopoverKeywords();
+      saveNodeKeywords();
+    });
+    chip.appendChild(x);
+    taxPopKwChips.appendChild(chip);
+  });
+}
+
+function addPopoverKeywordsFromInput() {
+  if (!taxPopKwInput) return;
+  const raw = (taxPopKwInput.value || '').trim();
+  if (!raw) return;
+  const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+  let changed = false;
+  for (const p of parts) {
+    if (!_popoverKeywords.some(k => k.toLowerCase() === p.toLowerCase())) {
+      _popoverKeywords.push(p);
+      changed = true;
+    }
+  }
+  taxPopKwInput.value = '';
+  if (changed) { renderPopoverKeywords(); saveNodeKeywords(); }
+}
+
+async function saveNodeKeywords() {
+  if (!_popoverNodeId) return;
+  try {
+    const r = await fetch(`/api/taxonomy/nodes/${encodeURIComponent(_popoverNodeId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keywords: _popoverKeywords }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    // Reflect the change on the in-memory tree node so the card updates.
+    const dnode = taxState.nodeMap.get(_popoverNodeId);
+    if (dnode && dnode.data) dnode.data.keywords = _popoverKeywords.slice();
+    const card = taxNodesLayer.querySelector(`g.tax-node[data-id="${CSS.escape(String(_popoverNodeId))}"]`);
+    if (card) updateNodeKeywordBadge(card, _popoverKeywords);
+  } catch (e) {
+    flashToast('keyword save failed: ' + e.message);
+  }
+}
+
+if (taxPopKwInput) {
+  taxPopKwInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addPopoverKeywordsFromInput(); }
+  });
+  taxPopKwInput.addEventListener('blur', addPopoverKeywordsFromInput);
 }
 
 // /api/taxonomy/nodes/{id}/docs returns {node_id, label, docs: [...]}.
@@ -4878,7 +5278,7 @@ if (taxPopAdd) taxPopAdd.addEventListener('click', async () => {
   try {
     const r = await fetch('/api/taxonomy/nodes', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label: label.trim(), parent_id: _popoverNodeId, description: '' }),
+      body: JSON.stringify({ label: label.trim(), parent_id: _popoverNodeId, description: '', is_leaf: true }),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     flashToast('child created');
@@ -5083,6 +5483,8 @@ function openTaxModal(mode = 'recompute') {
   taxModalError.textContent = '';
   taxModalTitle.textContent = mode === 'assign'
     ? 'Assigning unfiled documents…'
+    : mode === 'keywords'
+    ? 'Generating keywords…'
     : 'Recomputing taxonomy…';
   // Reset stage states
   for (const li of taxStagesEl.querySelectorAll('.tax-stage')) {
@@ -5098,6 +5500,15 @@ function openTaxModal(mode = 'recompute') {
       const li = taxStagesEl.querySelector(`.tax-stage[data-stage="${s}"]`);
       if (li) li.classList.add('stage-skipped');
     }
+  }
+  // Keyword backfill reuses the modal but has no build stages — skip them all
+  // and show live progress via the summary line.
+  if (mode === 'keywords') {
+    for (const li of taxStagesEl.querySelectorAll('.tax-stage')) {
+      li.classList.add('stage-skipped');
+    }
+    taxModalSummary.hidden = false;
+    taxModalSummary.textContent = 'starting…';
   }
   // Reset and start the live elapsed/ETA tracker.
   taxState.tickStartedAt = Date.now();
@@ -5239,6 +5650,19 @@ function applyStageEvent(stage, data, mode) {
     case 'summaries_done':
       markStage('doc_summary', 'done', data.n != null ? `${data.n} summarised` : null);
       break;
+    case 'node_keywords': {
+      const i = data.i, n = data.n;
+      if (i != null && n) {
+        const kws = Array.isArray(data.keywords) ? data.keywords.slice(0, 4).join(', ') : '';
+        const tag = data.skipped ? 'kept' : (kws || '—');
+        taxModalSummary.hidden = false;
+        taxModalSummary.textContent = `${i}/${n} · ${truncateText(data.label || '', 28)} → ${truncateText(tag, 40)}`;
+        taxState.tickLastI = i;
+        taxState.tickLastN = n;
+        paintTaxTick();
+      }
+      break;
+    }
     case 'embed_centroids_start':
       markStage('embed_centroids', 'active', data.n != null ? `${data.n} vectors` : null);
       break;
@@ -5279,10 +5703,16 @@ function applyStageEvent(stage, data, mode) {
       const nn = data.n_nodes;
       const nd = data.n_docs_assigned;
       const parts = [];
-      if (nn != null) parts.push(`${nn} nodes`);
-      if (nd != null) parts.push(`${nd} docs assigned`);
-      if (dur != null) parts.push(`${Number(dur).toFixed(1)}s`);
-      taxModalTitle.textContent = mode === 'assign' ? 'Assigned' : 'Done';
+      if (mode === 'keywords') {
+        if (data.updated != null) parts.push(`${data.updated} nodes keyworded`);
+        if (data.total != null) parts.push(`of ${data.total}`);
+      } else {
+        if (nn != null) parts.push(`${nn} nodes`);
+        if (nd != null) parts.push(`${nd} docs assigned`);
+        if (dur != null) parts.push(`${Number(dur).toFixed(1)}s`);
+      }
+      taxModalTitle.textContent = mode === 'assign' ? 'Assigned'
+        : mode === 'keywords' ? 'Keywords generated' : 'Done';
       taxModalSummary.textContent = parts.join(' · ');
       taxModalSummary.hidden = false;
       taxModalCloseBtn.hidden = false;
@@ -5309,6 +5739,9 @@ function showStageError(msg) {
   taxModalTitle.textContent = 'Failed';
 }
 
+if (taxKeywordsBtn) {
+  taxKeywordsBtn.addEventListener('click', () => streamRecompute('/api/taxonomy/keywords', 'keywords'));
+}
 if (taxRecomputeBtn) {
   taxRecomputeBtn.addEventListener('click', () => streamRecompute('/api/taxonomy/recompute', 'recompute'));
 }
@@ -5323,3 +5756,294 @@ if (taxAssignBtn) {
 }
 
 // (data-id attributes are set inside renderTaxonomy via the merged.attr below)
+
+// ============================================================
+// Phase 12 — Profile & preference editor
+// ============================================================
+const openProfileBtn = $('open-profile');
+const closeProfileBtn = $('close-profile');
+const refreshProfileBtn = $('refresh-profile');
+const profileExtractBtn = $('profile-extract');
+const profileRendered = $('profile-rendered');
+const profileList = $('profile-list');
+const profilePolarity = $('profile-polarity');
+const profileTopic = $('profile-topic');
+const profileValue = $('profile-value');
+const profileAddBtn = $('profile-add-btn');
+const profileCountEl = $('profile-count');
+
+function openProfileDrawer() {
+  document.body.dataset.view = '';
+  if (kgPage) kgPage.setAttribute('aria-hidden', 'true');
+  app.classList.remove('memories-open', 'feedback-open', 'docs-open');
+  app.classList.add('profile-open');
+  loadProfile();
+}
+function closeProfileDrawer() { app.classList.remove('profile-open'); }
+
+async function loadProfile() {
+  if (!profileList) return;
+  profileList.innerHTML = '<div class="tax-pop-empty">loading…</div>';
+  try {
+    const r = await fetch('/api/profile');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    renderProfile(data);
+  } catch (e) {
+    profileList.innerHTML = `<div class="tax-pop-empty">failed: ${escapeHTML(e.message)}</div>`;
+  }
+}
+
+function renderProfile(data) {
+  const prefs = data.preferences || [];
+  if (profileCountEl) profileCountEl.textContent = String(prefs.length);
+  if (profileRendered) {
+    const rendered = (data.rendered && data.rendered !== '(no profile yet)') ? data.rendered : '';
+    profileRendered.textContent = rendered;
+    profileRendered.hidden = !rendered;
+  }
+  profileList.innerHTML = '';
+  if (!prefs.length) {
+    profileList.innerHTML = '<div class="tax-pop-empty">No preferences yet. Add one above, or use ↑ to mine them from recent chats.</div>';
+    return;
+  }
+  const order = ['fact', 'style', 'like', 'dislike'];
+  const labels = { fact: 'Facts', style: 'Style', like: 'Likes', dislike: 'Dislikes' };
+  const grouped = {};
+  for (const p of prefs) (grouped[p.polarity] = grouped[p.polarity] || []).push(p);
+  for (const pol of order) {
+    const items = grouped[pol];
+    if (!items || !items.length) continue;
+    const sec = document.createElement('div');
+    sec.className = 'profile-section';
+    const h = document.createElement('div');
+    h.className = 'profile-section-label';
+    h.textContent = labels[pol];
+    sec.appendChild(h);
+    for (const p of items) {
+      const row = document.createElement('div');
+      row.className = 'profile-row';
+      const txt = document.createElement('div');
+      txt.className = 'profile-row-text';
+      txt.setAttribute('dir', 'auto');
+      txt.innerHTML = `<b>${escapeHTML(p.topic)}</b>${p.value ? ': ' + escapeHTML(p.value) : ''}`;
+      const meta = document.createElement('span');
+      meta.className = 'profile-row-conf';
+      meta.textContent = `${Math.round((p.confidence ?? 1) * 100)}%`;
+      const del = document.createElement('button');
+      del.className = 'profile-row-del';
+      del.type = 'button';
+      del.textContent = '×';
+      del.title = 'Delete';
+      del.addEventListener('click', () => deletePreference(p.pref_id));
+      row.appendChild(txt);
+      row.appendChild(meta);
+      row.appendChild(del);
+      sec.appendChild(row);
+    }
+    profileList.appendChild(sec);
+  }
+}
+
+async function addPreference() {
+  const topic = (profileTopic.value || '').trim();
+  if (!topic) { flashToast('topic required'); return; }
+  try {
+    const r = await fetch('/api/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        polarity: profilePolarity.value,
+        topic,
+        value: (profileValue.value || '').trim(),
+        confidence: 1.0,
+      }),
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
+    profileTopic.value = ''; profileValue.value = '';
+    loadProfile();
+  } catch (e) { flashToast('add failed: ' + e.message); }
+}
+
+async function deletePreference(id) {
+  try {
+    const r = await fetch('/api/profile/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    loadProfile();
+  } catch (e) { flashToast('delete failed: ' + e.message); }
+}
+
+async function extractPreferences() {
+  flashToast('mining recent sessions…');
+  try {
+    const r = await fetch('/api/memories/extract', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const items = data.items || [];
+    if (!items.length) { flashToast('no new memories found'); return; }
+    // Show candidates with save buttons at the top of the list.
+    const box = document.createElement('div');
+    box.className = 'profile-suggest';
+    box.innerHTML = `<div class="profile-section-label">Suggested from chats (${items.length})</div>`;
+    items.forEach((it) => {
+      const row = document.createElement('div');
+      row.className = 'profile-row';
+      const txt = document.createElement('div');
+      txt.className = 'profile-row-text'; txt.setAttribute('dir', 'auto');
+      txt.textContent = it.text || '';
+      const save = document.createElement('button');
+      save.className = 'tax-mini-btn'; save.textContent = 'save';
+      save.addEventListener('click', async () => {
+        try {
+          await fetch('/api/memories', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: it.text }),
+          });
+          row.remove(); flashToast('memory saved');
+        } catch { flashToast('save failed'); }
+      });
+      row.appendChild(txt); row.appendChild(save);
+      box.appendChild(row);
+    });
+    profileList.prepend(box);
+  } catch (e) { flashToast('extract failed: ' + e.message); }
+}
+
+if (openProfileBtn) openProfileBtn.addEventListener('click', openProfileDrawer);
+if (closeProfileBtn) closeProfileBtn.addEventListener('click', closeProfileDrawer);
+if (refreshProfileBtn) refreshProfileBtn.addEventListener('click', loadProfile);
+if (profileExtractBtn) profileExtractBtn.addEventListener('click', extractPreferences);
+if (profileAddBtn) profileAddBtn.addEventListener('click', addPreference);
+if (profileValue) profileValue.addEventListener('keydown', (e) => { if (e.key === 'Enter') addPreference(); });
+
+// ============================================================
+// Phase 12 — Knowledge-graph viewer (D3 force graph)
+// ============================================================
+const openKgBtn = $('open-kg');
+const kgBackBtn = $('kg-back');
+const kgPage = $('kg-page');
+const kgSvg = $('kg-svg');
+const kgZoomLayer = $('kg-zoom-layer');
+const kgLinksLayer = $('kg-links-layer');
+const kgNodesLayer = $('kg-nodes-layer');
+const kgEmpty = $('kg-empty');
+const kgLoading = $('kg-loading');
+const kgReloadBtn = $('kg-reload');
+const kgLimitSel = $('kg-limit');
+const kgTypeSel = $('kg-type');
+const kgStatsSub = $('kg-stats-sub');
+const kgTooltip = $('kg-tooltip');
+const kgCountEl = $('kg-count');
+let _kgSim = null;
+
+function openKgPage() {
+  document.body.dataset.view = 'kg';
+  if (kgPage) kgPage.setAttribute('aria-hidden', 'false');
+  app.classList.remove('drawer-open', 'memories-open', 'docs-open', 'feedback-open', 'profile-open');
+  loadKgGraph();
+}
+function closeKgPage() {
+  document.body.dataset.view = '';
+  if (kgPage) kgPage.setAttribute('aria-hidden', 'true');
+  if (_kgSim) { try { _kgSim.stop(); } catch {} _kgSim = null; }
+  if (kgTooltip) kgTooltip.hidden = true;
+}
+
+async function loadKgGraph() {
+  if (!kgSvg) return;
+  if (kgLoading) kgLoading.hidden = false;
+  if (kgEmpty) kgEmpty.hidden = true;
+  const limit = kgLimitSel ? kgLimitSel.value : 300;
+  const ntype = kgTypeSel ? kgTypeSel.value : 'phrase';
+  try {
+    const [gr, st] = await Promise.all([
+      fetch(`/api/kg/graph?limit=${limit}&node_type=${ntype}`).then(r => r.json()),
+      fetch('/api/kg/stats').then(r => r.json()).catch(() => null),
+    ]);
+    if (st && kgStatsSub) {
+      kgStatsSub.textContent = `${st.phrase_nodes} phrases · ${st.passage_nodes} passages · ${st.edges} edges · ${st.communities} communities`;
+      if (kgCountEl) kgCountEl.textContent = String(st.phrase_nodes + st.passage_nodes);
+    }
+    if (kgLoading) kgLoading.hidden = true;
+    if (!gr.nodes || !gr.nodes.length) {
+      if (kgEmpty) kgEmpty.hidden = false;
+      kgLinksLayer.innerHTML = ''; kgNodesLayer.innerHTML = '';
+      return;
+    }
+    renderKgGraph(gr);
+  } catch (e) {
+    if (kgLoading) kgLoading.hidden = true;
+    if (kgEmpty) { kgEmpty.hidden = false; }
+    console.error('kg load failed', e);
+  }
+}
+
+function renderKgGraph(gr) {
+  const svg = d3.select(kgSvg);
+  const rect = kgSvg.getBoundingClientRect();
+  const W = rect.width || 900, H = rect.height || 600;
+  const nodes = gr.nodes.map(n => ({ ...n }));
+  const idset = new Set(nodes.map(n => n.id));
+  const links = gr.edges
+    .filter(e => idset.has(e.src) && idset.has(e.dst))
+    .map(e => ({ source: e.src, target: e.dst, relation: e.relation, weight: e.weight }));
+
+  // Degree → radius scale.
+  const maxDeg = Math.max(1, ...nodes.map(n => n.degree || 1));
+  const rOf = d => 4 + 7 * Math.sqrt((d.degree || 1) / maxDeg);
+
+  d3.select(kgLinksLayer).selectAll('*').remove();
+  d3.select(kgNodesLayer).selectAll('*').remove();
+
+  const link = d3.select(kgLinksLayer).selectAll('line')
+    .data(links).enter().append('line')
+    .attr('class', 'kg-link')
+    .attr('stroke-width', d => Math.min(3, 0.6 + (d.weight || 1) * 0.4));
+
+  const node = d3.select(kgNodesLayer).selectAll('g.kg-node')
+    .data(nodes).enter().append('g').attr('class', d => 'kg-node kg-' + (d.type || 'phrase'));
+  node.append('circle').attr('r', rOf);
+  node.append('text').attr('class', 'kg-node-label')
+    .attr('x', d => rOf(d) + 3).attr('y', 4)
+    .text(d => truncateText(d.label || '', 22));
+
+  node.on('mousemove', (ev, d) => {
+    if (!kgTooltip) return;
+    kgTooltip.hidden = false;
+    kgTooltip.innerHTML = `<b>${escapeHTML(d.label || '')}</b><br><span class="kg-tt-meta">${escapeHTML(d.type)} · degree ${d.degree || 0}</span>`;
+    const cr = kgSvg.getBoundingClientRect();
+    kgTooltip.style.left = (ev.clientX - cr.left + 12) + 'px';
+    kgTooltip.style.top = (ev.clientY - cr.top + 12) + 'px';
+  }).on('mouseleave', () => { if (kgTooltip) kgTooltip.hidden = true; });
+
+  if (_kgSim) { try { _kgSim.stop(); } catch {} }
+  _kgSim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(60).strength(0.4))
+    .force('charge', d3.forceManyBody().strength(-90))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('collide', d3.forceCollide().radius(d => rOf(d) + 4))
+    .on('tick', () => {
+      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      node.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+
+  node.call(d3.drag()
+    .on('start', (ev, d) => { if (!ev.active) _kgSim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+    .on('drag', (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+    .on('end', (ev, d) => { if (!ev.active) _kgSim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  // Zoom/pan.
+  const zoom = d3.zoom().scaleExtent([0.2, 4]).on('zoom', (ev) => {
+    d3.select(kgZoomLayer).attr('transform', ev.transform);
+  });
+  svg.call(zoom);
+}
+
+if (openKgBtn) openKgBtn.addEventListener('click', openKgPage);
+if (kgBackBtn) kgBackBtn.addEventListener('click', closeKgPage);
+if (kgReloadBtn) kgReloadBtn.addEventListener('click', loadKgGraph);
+if (kgLimitSel) kgLimitSel.addEventListener('change', loadKgGraph);
+if (kgTypeSel) kgTypeSel.addEventListener('change', loadKgGraph);

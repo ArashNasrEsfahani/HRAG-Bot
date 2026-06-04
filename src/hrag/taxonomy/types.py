@@ -29,14 +29,25 @@ class TaxonomyNode:
     doc_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # Phase 12 — per-node keywords for hybrid (dense + sparse) routing. Empty
+    # until a tree is built with the keyword-aware propose prompt or backfilled
+    # via `hrag taxonomy keywords`. Stored as a JSON list on kg_taxonomy_nodes.
+    keywords: list[str] = field(default_factory=list)
 
 
 @dataclass
 class NodeScore:
-    """A node with its score against the current query."""
+    """A node with its score against the current query.
+
+    ``score`` is the combined routing score. When hybrid keyword routing is
+    active it equals ``cosine + keyword_weight * keyword_score``; otherwise it
+    is the plain cosine. ``keyword_score`` (0..1) is kept separately so the
+    GUI trace can show how much the keyword signal contributed.
+    """
 
     node: TaxonomyNode
-    score: float          # cosine similarity (query, node.centroid) in [-1, 1]
+    score: float          # combined routing score
+    keyword_score: float = 0.0   # normalized keyword overlap contribution (0..1)
 
 
 @dataclass

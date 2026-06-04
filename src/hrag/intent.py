@@ -6,7 +6,7 @@ covers four shapes: personal-phrase substring, short-interrogative greeting
 greeting vocab. **Fast-path verdicts are NOT cached** — they run on every
 call (~20 µs) so source-level fixes (a new personal phrase, a tweak to the
 factual-opener regex) take effect on the next message in the same long-lived
-Streamlit process; no orchestrator rebuild needed.
+server process; no orchestrator rebuild needed.
 
 LLM fallback: structured-output prompt when fast path is inconclusive. LLM
 verdicts ARE cached, but the cache is **version-stamped** with a SHA-1 of
@@ -136,7 +136,9 @@ _FACTUAL_OPENERS_RE = re.compile(
     r"describe|describes|description of|"
     r"summari[sz]e|summary of|"
     r"tell me about|"
-    r"give me (?:a )?(?:summary|overview|definition|explanation) of"
+    r"give me (?:a )?(?:summary|overview|definition|explanation) of|"
+    r"check|show|list|find|get|compare|look (?:at|up)|search (?:for)?|"
+    r"retrieve|fetch|walk me through|calculate|compute"
     r")\s+(?!(?:me\b|myself\b|my\s+(?:name|self)\b|i\b|i'?m\b))"
 )
 
@@ -150,7 +152,7 @@ _GREETING_INTERROGATIVES: frozenset[str] = frozenset(
 
 # Boot self-test golden set — exercises every fast-path branch with realistic
 # queries. Verified on every Orchestrator boot; mismatches → one logger.warning
-# line so silent fast-path regressions show up in the streamlit log.
+# line so silent fast-path regressions show up in the server log.
 _BOOT_GOLDEN: tuple[tuple[str, Intent], ...] = (
     ("hey",                          Intent.GREETING),
     ("hello there",                  Intent.GREETING),
@@ -164,6 +166,9 @@ _BOOT_GOLDEN: tuple[tuple[str, Intent], ...] = (
     ("explain knowledge graphs",     Intent.FACTUAL),
     ("tell me about transformers",   Intent.FACTUAL),
     ("summarize the attention paper",Intent.FACTUAL),
+    ("check the ml tree",            Intent.FACTUAL),   # imperative fast-path
+    ("list all papers about RAG",    Intent.FACTUAL),   # imperative fast-path
+    ("show the results",             Intent.FACTUAL),   # imperative fast-path
     ("what's my name",               Intent.PERSONAL),
     ("who am I",                     Intent.PERSONAL),
     ("what do you know about me",    Intent.PERSONAL),
@@ -236,6 +241,146 @@ def extract_entities(text: str) -> set[str]:
             continue
         out.add(tok)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 11.1 — reflective / opinion personal-question detector (two-tier)
+# ---------------------------------------------------------------------------
+#
+# Two precision tiers serve the asymmetric cost of getting this wrong:
+#   * STRICT (high precision) gates *coercion* — overriding a FACTUAL/UNCLEAR
+#     verdict to PERSONAL. A false positive here hijacks a real question
+#     ("describe me a function"), so only unambiguous opinion-about-me phrases
+#     qualify.
+#   * RECALL (high recall) fires only *within* an already-PERSONAL turn, where
+#     a false positive merely picks the synthesis prompt over the recital one
+#     (cheap). It adds a two-factor self-reference × opinion-cue match on top
+#     of the strict phrases.
+# Both tiers are pure functions — no LLM, no I/O (contract-19 property).
+
+# Zero-width non-joiner — Persian text sprinkles these between morphemes
+# ("می‌بینی"); stripping them collapses the ZWNJ / non-ZWNJ spelling variants
+# so we don't have to enumerate both.
+_ZWNJ = "‌"
+
+
+def _normalize_reflect(query: str) -> str:
+    """Lowercase, strip ZWNJ, and collapse whitespace for reflective matching."""
+    text = (query or "").lower().replace(_ZWNJ, "")
+    return " ".join(text.split())
+
+
+# STRICT phrase regex — unambiguous "your opinion/impression OF ME" shapes.
+# The bare `describe me` branch is end-anchored AND guarded by a negative
+# lookahead so "describe me a function / how X / the Y" do NOT match.
+_REFLECTIVE_STRICT_RE = re.compile(
+    r"(?:"
+    r"what\s+do\s+you\s+(?:think|reckon|feel|make)\s+(?:about|of)\s+me|"
+    r"what(?:'?s| is)\s+your\s+(?:opinion|impression|take|view|thought|read)"
+    r"\s+(?:on|of|about)\s+me|"
+    r"how\s+(?:do|would)\s+you\s+(?:see|describe|view|perceive|picture)\s+me|"
+    r"how\s+do\s+i\s+come\s+across|"
+    r"describe\s+me(?!\s+(?:a|an|the|how|what|why|to|some|like\s+a))\s*[?.!]*$|"
+    r"sum\s+me\s+up|"
+    r"what\s+(?:kind|sort|type)\s+of\s+(?:person|guy|human|man|woman)\s+am\s+i|"
+    r"what\s+(?:am\s+i|do\s+you\s+think\s+i'?m|do\s+you\s+think\s+i\s+am)\s+like|"
+    r"your\s+(?:honest\s+)?(?:opinion|impression|thoughts?|take|read|assessment)"
+    r"\s+(?:on|of|about)\s+me"
+    r")",
+    re.IGNORECASE,
+)
+
+# Farsi/Persian strict phrases ("what do you think about me", "your opinion
+# about me", "how do you see me"). Matched against the ZWNJ-normalized text,
+# so only the joined spelling is listed.
+_REFLECTIVE_FARSI: tuple[str, ...] = (
+    "درباره من چی فکر",
+    "در مورد من چی فکر",
+    "نظرت درباره من",
+    "نظرت در مورد من",
+    "منو چطور میبینی",
+    "من چطور آدمی",
+)
+
+# Finglish (Romanized Persian) strict phrases.
+_REFLECTIVE_FINGLISH: tuple[str, ...] = (
+    "nazaret darbare man",
+    "nazaret dar morede man",
+    "man chetori",
+    "darbare man chi fekr",
+)
+
+# Imperative ditransitives where "me" is a grammatical object, NOT a
+# self-reference subject — "tell me about X", "show me Y". Stripped before the
+# self-reference test so a factual "tell me about hipporag" is not mistaken
+# for a question about the user.
+_IMPERATIVE_ME_RE = re.compile(
+    r"\b(?:tell|give|show|let|help|teach|find|get|bring|send|email|remind|ask|"
+    r"walk|point|hand|offer|fetch)\s+me\b",
+    re.IGNORECASE,
+)
+
+# RECALL tier — two-factor. A self-reference token AND an opinion-cue token
+# anywhere in the (normalized) query. Word-boundaried so "image" does not
+# trip "i" and "metaphor" does not trip "me".
+_SELF_REF_RE = re.compile(
+    r"\b(?:me|myself|i|i'?m|my)\b|من|منو|خودم",
+    re.IGNORECASE,
+)
+
+
+def _self_ref_text(query: str) -> str:
+    """Normalized query with imperative-'me' phrases removed, for self-ref tests."""
+    return _IMPERATIVE_ME_RE.sub(" ", _normalize_reflect(query))
+_OPINION_CUE_RE = re.compile(
+    r"\b(?:think|thoughts?|opinion|impression|view|take|perceive|describe|"
+    r"personality|vibe|reckon|assessment|judge|judgement|read)\b",
+    re.IGNORECASE,
+)
+
+
+def is_reflective_strict(query: str) -> bool:
+    """High-precision reflective test — gates verdict *coercion*.
+
+    Pure function, no LLM/IO. Only unambiguous "opinion/impression of me"
+    phrasings (EN + FA + Finglish) return True, so a misclassified FACTUAL
+    question like "describe me a function" is never coerced to PERSONAL.
+    """
+    if not query:
+        return False
+    norm = _normalize_reflect(query)
+    if _REFLECTIVE_STRICT_RE.search(norm):
+        return True
+    if any(p in norm for p in _REFLECTIVE_FINGLISH):
+        return True
+    # Farsi phrases: match the normalized (lowercased is a no-op for Persian).
+    return any(p in norm for p in _REFLECTIVE_FARSI)
+
+
+def has_self_reference(query: str) -> bool:
+    """True when *query* refers to the user (me/I/my/myself; FA من/منو/خودم).
+
+    Pure function. Used to gate the hybrid LLM reflective call so it only
+    fires on plausibly-personal turns.
+    """
+    if not query:
+        return False
+    return bool(_SELF_REF_RE.search(_self_ref_text(query)))
+
+
+def is_reflective_query(query: str) -> bool:
+    """Recall-tier reflective test — used *within* an already-PERSONAL turn.
+
+    Returns True for the strict phrases OR a two-factor match (a self-reference
+    token AND an opinion-cue token). The looser two-factor branch boosts recall
+    where false positives are cheap. Pure function, no LLM/IO.
+    """
+    if not query:
+        return False
+    if is_reflective_strict(query):
+        return True
+    norm = _normalize_reflect(query)
+    return bool(_SELF_REF_RE.search(_self_ref_text(query)) and _OPINION_CUE_RE.search(norm))
 
 
 def _mentions_entity(query: str, entities: set[str]) -> bool:
@@ -569,3 +714,89 @@ class IntentClassifier:
             if actual != expected:
                 failures.append((q, expected, actual))
         return failures
+
+
+# ---------------------------------------------------------------------------
+# Phase 11.1 — reflective LLM fallback classifier (hybrid mode)
+# ---------------------------------------------------------------------------
+
+
+class ReflectiveClassifier:
+    """Tiny yes/no LLM judge: is *query* a reflective/opinion request?
+
+    Mirrors :class:`IntentClassifier`'s caching philosophy — a version-stamped
+    in-process cache keyed on the normalized query (+ a short history
+    fingerprint), so a fixed verdict never haunts a long-lived session past a
+    prompt edit. Consulted ONLY in hybrid mode, only when the pure-regex tiers
+    miss AND the turn is plausibly personal — so the LLM cost lands on rare
+    ambiguous turns.
+    """
+
+    name: str = "reflective"
+
+    def __init__(self, llm: Optional["LLMProvider"], *, max_tokens: int = 4) -> None:
+        self._llm = llm
+        self._max_tokens = max_tokens
+        prompt_path = Path(__file__).parent / "prompts" / "reflective_check.md"
+        self._template = prompt_path.read_text(encoding="utf-8")
+        self._cache_version: str = hashlib.sha1(
+            self._template.encode("utf-8")
+        ).hexdigest()[:12]
+        self._cache: dict[str, tuple[bool, str]] = {}
+
+    def classify(
+        self,
+        query: str,
+        *,
+        history: Optional[list[tuple[str, str]]] = None,
+    ) -> bool:
+        """Return True when the LLM judges *query* a reflective request.
+
+        Defensive: any LLM/parse failure returns False (the safe default —
+        the regex tiers already had their say, and a missed reflective turn
+        merely falls back to the prior personal behaviour).
+        """
+        if not query or self._llm is None:
+            return False
+
+        norm = _normalize_reflect(query)
+        cache_key = norm
+        if history:
+            recent = history[-4:]
+            hist_sig = "||".join(f"{r}:{c[:40]}" for r, c in recent)
+            cache_key = norm + "@@" + hashlib.sha1(
+                hist_sig.encode("utf-8")
+            ).hexdigest()[:8]
+
+        cached = self._cache.get(cache_key)
+        if cached is not None and cached[1] == self._cache_version:
+            return cached[0]
+
+        verdict = False
+        try:
+            history_block = _render_history_block(history)
+            flat_query = " | ".join(
+                line.strip() for line in query.split("\n") if line.strip()
+            )
+            try:
+                prompt = self._template.format(
+                    query=flat_query, conversation_history=history_block,
+                )
+            except (KeyError, IndexError):
+                prompt = self._template.format(query=flat_query)
+            raw: str = self._llm.complete(
+                prompt, temperature=0.0, max_tokens=self._max_tokens,
+            )
+            verdict = "yes" in (raw or "").strip().lower()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ReflectiveClassifier LLM call failed (%s); defaulting to False.",
+                exc,
+            )
+            verdict = False
+
+        self._cache[cache_key] = (verdict, self._cache_version)
+        logger.info(
+            "reflective verdict: query=%r reflective=%s", query[:80], verdict,
+        )
+        return verdict

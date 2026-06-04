@@ -27,13 +27,16 @@ And the hot path: ``beam_descend``.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import secrets
 import struct
+import time
 import warnings
 from typing import TYPE_CHECKING, Optional
 
+from hrag.taxonomy.keywords import keyword_overlap
 from hrag.taxonomy.types import (
     DescendResult,
     LevelTrace,
@@ -57,6 +60,30 @@ class TaxonomyStore:
     def __init__(self, db: "Database", embedder: "EmbeddingProvider") -> None:
         self._db = db
         self._embedder = embedder
+        # Phase 12 — in-memory per-user node cache for the beam-descend hot
+        # path. Each entry is (timestamp, nodes). Invalidated immediately on
+        # any write through this instance and after ``cache_ttl_s`` seconds so
+        # an external writer (e.g. a CLI rebuild) is eventually picked up.
+        # ``cache_ttl_s <= 0`` disables caching entirely.
+        self.cache_ttl_s: float = 30.0
+        self._node_cache: dict[str, tuple[float, list[TaxonomyNode]]] = {}
+
+    def _invalidate_cache(self, user_id: Optional[str] = None) -> None:
+        """Drop cached nodes for *user_id* (or everyone when None)."""
+        if user_id is None:
+            self._node_cache.clear()
+        else:
+            self._node_cache.pop(user_id, None)
+
+    def _commit(self) -> None:
+        """Commit a write and invalidate the node cache.
+
+        Every node-mutating method commits through here so a write is always
+        reflected on the next ``list_nodes`` / ``beam_descend``. The cache is
+        small, so a full clear on each (infrequent) write is cheap.
+        """
+        self._db.commit()
+        self._invalidate_cache()
 
     # ------------------------------------------------------------------
     # Packing helpers
@@ -108,6 +135,7 @@ class TaxonomyStore:
             doc_count=int(row["doc_count"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            keywords=_decode_keywords(_row_get(row, "keywords")),
         )
 
     # ------------------------------------------------------------------
@@ -126,7 +154,7 @@ class TaxonomyStore:
                 ") VALUES (?, ?, NULL, ?, ?, 0, 0, 0)",
                 (root_id, user_id, "root", ""),
             )
-        self._db.commit()
+        self._commit()
         node = self.get_node(root_id)
         assert node is not None  # just inserted
         return node
@@ -138,6 +166,7 @@ class TaxonomyStore:
         label: str,
         description: str = "",
         is_leaf: bool = False,
+        keywords: Optional[list[str]] = None,
     ) -> TaxonomyNode:
         parent = self.get_node(parent_id)
         if parent is None:
@@ -172,9 +201,10 @@ class TaxonomyStore:
         with self._db.conn:
             self._db.execute(
                 "INSERT INTO kg_taxonomy_nodes("
-                "node_id, user_id, parent_id, label, description, depth, is_leaf, doc_count"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-                (node_id, user_id, parent_id, label, description, depth, 1 if is_leaf else 0),
+                "node_id, user_id, parent_id, label, description, depth, is_leaf, doc_count, keywords"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                (node_id, user_id, parent_id, label, description, depth,
+                 1 if is_leaf else 0, _encode_keywords(keywords)),
             )
             if unsorted_id is not None:
                 self._db.execute(
@@ -194,7 +224,7 @@ class TaxonomyStore:
                 "WHERE node_id = ?",
                 (parent_id,),
             )
-        self._db.commit()
+        self._commit()
         node = self.get_node(node_id)
         assert node is not None
         return node
@@ -230,7 +260,7 @@ class TaxonomyStore:
                 f"UPDATE kg_taxonomy_nodes SET {', '.join(sets)} WHERE node_id = ?",
                 params,
             )
-        self._db.commit()
+        self._commit()
 
     def move_node(self, node_id: str, new_parent_id: str) -> None:
         node = self.get_node(node_id)
@@ -303,7 +333,7 @@ class TaxonomyStore:
             # Callers that want that should call recompute_all_centroids and
             # inspect children separately.
             _ = old_parent_id
-        self._db.commit()
+        self._commit()
 
     def delete_node(
         self,
@@ -351,12 +381,12 @@ class TaxonomyStore:
                 "DELETE FROM kg_taxonomy_nodes WHERE node_id = ?",
                 (node_id,),
             )
-        self._db.commit()
+        self._commit()
 
     def get_node(self, node_id: str) -> Optional[TaxonomyNode]:
         row = self._db.execute(
             "SELECT node_id, user_id, parent_id, label, description, depth, "
-            "is_leaf, centroid, centroid_dim, doc_count, created_at, updated_at "
+            "is_leaf, centroid, centroid_dim, doc_count, created_at, updated_at, keywords "
             "FROM kg_taxonomy_nodes WHERE node_id = ?",
             (node_id,),
         ).fetchone()
@@ -365,20 +395,44 @@ class TaxonomyStore:
     def get_children(self, node_id: str) -> list[TaxonomyNode]:
         rows = self._db.execute(
             "SELECT node_id, user_id, parent_id, label, description, depth, "
-            "is_leaf, centroid, centroid_dim, doc_count, created_at, updated_at "
+            "is_leaf, centroid, centroid_dim, doc_count, created_at, updated_at, keywords "
             "FROM kg_taxonomy_nodes WHERE parent_id = ? ORDER BY label",
             (node_id,),
         ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
     def list_nodes(self, user_id: str) -> list[TaxonomyNode]:
+        # Phase 12 — serve from the per-user cache when fresh. Beam descend
+        # calls this on every retrieval; caching skips the full SELECT + unpack
+        # for bursts of queries. Results are identical to a fresh read.
+        if self.cache_ttl_s > 0.0:
+            cached = self._node_cache.get(user_id)
+            if cached is not None and (time.monotonic() - cached[0]) < self.cache_ttl_s:
+                return cached[1]
         rows = self._db.execute(
             "SELECT node_id, user_id, parent_id, label, description, depth, "
-            "is_leaf, centroid, centroid_dim, doc_count, created_at, updated_at "
+            "is_leaf, centroid, centroid_dim, doc_count, created_at, updated_at, keywords "
             "FROM kg_taxonomy_nodes WHERE user_id = ? ORDER BY depth, label",
             (user_id,),
         ).fetchall()
-        return [self._row_to_node(r) for r in rows]
+        nodes = [self._row_to_node(r) for r in rows]
+        if self.cache_ttl_s > 0.0:
+            self._node_cache[user_id] = (time.monotonic(), nodes)
+        return nodes
+
+    def set_node_keywords(
+        self, user_id: str, node_id: str, keywords: list[str]
+    ) -> None:
+        """Persist *keywords* (JSON list) on a node. Invalidates the cache."""
+        with self._db.conn:
+            self._db.execute(
+                "UPDATE kg_taxonomy_nodes "
+                "SET keywords = ?, updated_at = datetime('now') "
+                "WHERE node_id = ? AND user_id = ?",
+                (_encode_keywords(keywords), node_id, user_id),
+            )
+        self._commit()
+        self._invalidate_cache(user_id)
 
     def get_tree(self, user_id: str) -> dict[str, list[str]]:
         rows = self._db.execute(
@@ -411,7 +465,7 @@ class TaxonomyStore:
                     "DELETE FROM kg_taxonomy_doc_meta WHERE user_id = ?",
                     (user_id,),
                 )
-        self._db.commit()
+        self._commit()
 
     # ------------------------------------------------------------------
     # Assignments
@@ -446,7 +500,7 @@ class TaxonomyStore:
                 "score = excluded.score, is_primary = excluded.is_primary",
                 (user_id, doc_id, node_id, float(score), 1 if is_primary else 0),
             )
-        self._db.commit()
+        self._commit()
 
     def unassign_doc(
         self,
@@ -466,7 +520,7 @@ class TaxonomyStore:
                 (user_id, doc_id, node_id),
             )
         removed = cur.rowcount or 0
-        self._db.commit()
+        self._commit()
         return int(removed)
 
     def get_docs_at(
@@ -544,7 +598,7 @@ class TaxonomyStore:
                 "updated_at = excluded.updated_at",
                 (user_id, doc_id, summary, blob, dim),
             )
-        self._db.commit()
+        self._commit()
 
     def get_doc_meta(self, user_id: str, doc_id: str) -> Optional[dict]:
         row = self._db.execute(
@@ -619,7 +673,7 @@ class TaxonomyStore:
                 "WHERE node_id = ?",
                 (blob, dim, new_doc_count, node_id),
             )
-        self._db.commit()
+        self._commit()
 
     def recompute_all_centroids(self, user_id: str) -> None:
         # Bottom-up: deepest nodes first so internal nodes see already-fresh
@@ -674,6 +728,8 @@ class TaxonomyStore:
         min_score: float = 0.05,
         dominance_gap: float = 0.0,
         min_top_score_floor: float = 0.0,
+        query_keywords: Optional[list[str]] = None,
+        keyword_weight: float = 0.0,
     ) -> DescendResult:
         """Beam-descend the user's taxonomy tree.
 
@@ -715,15 +771,28 @@ class TaxonomyStore:
         trace: list[LevelTrace] = []
         depth = 0
 
+        # Phase 12 — hybrid routing. When keyword_weight > 0 and we have query
+        # keywords, blend a normalized keyword-overlap signal into the cosine
+        # score: combined = cosine + keyword_weight * overlap. A node with no
+        # keywords contributes 0 overlap, so this is a strict no-op on
+        # un-keyworded trees (preserves the dense-only behaviour exactly).
+        kw_on = bool(keyword_weight) and bool(query_keywords)
+
         while frontier and depth < max_depth:
             considered: list[NodeScore] = []
             for parent_node, _ in frontier:
                 for child in children_of.get(parent_node.node_id, []):
                     if child.centroid is None:
-                        s = missing_score
+                        cos = missing_score
                     else:
-                        s = self._cosine(query_embedding, child.centroid)
-                    considered.append(NodeScore(node=child, score=float(s)))
+                        cos = self._cosine(query_embedding, child.centroid)
+                    kw = 0.0
+                    if kw_on and child.keywords:
+                        kw = keyword_overlap(query_keywords or [], child.keywords)
+                    combined = float(cos) + (keyword_weight * kw if kw_on else 0.0)
+                    considered.append(
+                        NodeScore(node=child, score=combined, keyword_score=float(kw))
+                    )
 
             if not considered:
                 trace.append(LevelTrace(depth=depth, considered=[], kept=[]))
@@ -787,3 +856,45 @@ def _mean(vecs: list[list[float]]) -> list[float]:
             out[i] += v[i]
     n = float(len(vecs))
     return [x / n for x in out]
+
+
+def _row_get(row, key: str):
+    """Return ``row[key]`` or None when the column is absent.
+
+    sqlite3.Row raises IndexError on an unknown column; on a pre-Phase-12 DB
+    the ``keywords`` column may not exist, so we probe ``keys()`` first.
+    """
+    try:
+        if key in row.keys():
+            return row[key]
+    except (AttributeError, IndexError, TypeError):
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            return None
+    return None
+
+
+def _decode_keywords(raw) -> list[str]:
+    """Decode the JSON keywords TEXT column into a clean list of strings."""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw if x]
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x).strip() for x in data if str(x).strip()]
+
+
+def _encode_keywords(keywords: Optional[list[str]]) -> Optional[str]:
+    """Encode a keyword list to compact JSON TEXT (None when empty)."""
+    if not keywords:
+        return None
+    clean = [str(k).strip() for k in keywords if str(k).strip()]
+    if not clean:
+        return None
+    return json.dumps(clean, ensure_ascii=False)

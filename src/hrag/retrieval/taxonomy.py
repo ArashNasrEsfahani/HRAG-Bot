@@ -79,6 +79,18 @@ class TaxonomyRetriever(Retriever):
         self._last_user_id = user_id
         q_emb: list[float] = self._embedder.embed_one(query)
 
+        # Phase 12 — hybrid routing. Extract query keywords cheaply (pure
+        # function, no LLM, EN + FA) and pass them with the configured weight
+        # so beam descend can blend keyword overlap into the cosine score.
+        # No-op when disabled or when the tree carries no keywords.
+        query_keywords: list[str] = []
+        keyword_weight = 0.0
+        if getattr(self._cfg, "keyword_routing_enabled", False):
+            from hrag.taxonomy.keywords import tokenize  # local import
+
+            query_keywords = tokenize(query)
+            keyword_weight = float(getattr(self._cfg, "keyword_weight", 0.0))
+
         # The old `short_query_force_top1_words` knob has been removed — its
         # job is now done upstream by the intent classifier (queries like
         # "hey" / "thanks" never reach retrieval at all; they're handled by
@@ -91,6 +103,8 @@ class TaxonomyRetriever(Retriever):
             self._cfg.min_node_score,
             dominance_gap=getattr(self._cfg, "beam_dominance_gap", 0.0),
             min_top_score_floor=getattr(self._cfg, "min_top_score_floor", 0.0),
+            query_keywords=query_keywords,
+            keyword_weight=keyword_weight,
         )
         self.last_descend = result
         self._tree_empty = False
@@ -341,6 +355,9 @@ class TaxonomyRetriever(Retriever):
                     "label": ns.node.label,
                     "score": float(ns.score),
                     "kept": ns.node.node_id in kept_ids,
+                    # Phase 12 — hybrid routing diagnostics for the GUI trace.
+                    "keyword_score": float(getattr(ns, "keyword_score", 0.0)),
+                    "keywords": list(getattr(ns.node, "keywords", []) or [])[:8],
                 }
                 for ns in level.considered
             ]

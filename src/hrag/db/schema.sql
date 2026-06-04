@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS kg_taxonomy_nodes (
     centroid       BLOB,                                   -- packed float32 (embeddings.dim)
     centroid_dim   INTEGER,                                -- sanity-check dim
     doc_count      INTEGER NOT NULL DEFAULT 0,             -- cached count of descendants
+    keywords       TEXT,                                   -- Phase 12: JSON list for hybrid routing
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,

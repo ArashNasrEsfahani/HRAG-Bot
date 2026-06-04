@@ -75,12 +75,22 @@ def _expand_math_meta(query: str) -> str:
 
 
 def _looks_like_followup(question: str) -> bool:
-    """True when the question probably depends on the prior turn."""
+    """True when the question probably depends on the prior turn.
+
+    A query is a follow-up when it contains a bare pronoun ("it", "this",
+    "that", …) or a follow-up opener ("tell me more", "elaborate", …), OR
+    when it is extremely short (≤3 tokens) and likely a bare fragment.
+    Crucially, a self-contained imperative like "check the ml tree" (4 tokens,
+    no pronouns, no opener) is NOT a follow-up — the old ≤6-token blanket
+    rule was causing those queries to inherit the previous turn's text,
+    polluting the taxonomy-descent embedding.
+    """
     if not question.strip():
         return False
 
     tokens = _RE_TOKEN.findall(question.lower())
-    if len(tokens) <= 6:
+    # Bare fragments of ≤3 tokens almost always need an antecedent.
+    if len(tokens) <= 3:
         return True
     if _RE_FOLLOWUP_OPENER.match(question):
         return True

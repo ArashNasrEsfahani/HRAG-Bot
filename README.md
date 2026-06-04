@@ -18,7 +18,7 @@ A personal RAG chatbot for 10–1000 documents with **hierarchical reasoning**, 
 - Pluggable **sentence-transformers / OpenAI** embedding backends.
 - Multi-user-ready SQLite schema (single user is the default).
 - Interactive CLI with **live progress display** and a `/status` command to see session state.
-- **Streamlit GUI dashboard** (`hrag gui`) with Chat · Memories · Documents · 🌳 Taxonomy · Profile · Users · Sessions · Stats pages.
+- **Web GUI** (`hrag web`) — FastAPI + SSE SPA modelled on claude.ai / ChatGPT: streaming chat, sources, sessions, memories, document upload, feedback.
 - 537 unit tests passing.
 
 ## Quick start
@@ -99,7 +99,7 @@ Other CLI commands:
 - `hrag remember "<text>"` · `hrag remember <path>` — save an episodic memory inline or bulk-import notes.
 - `hrag memory list` · `hrag memory extract --session <id>` — inspect / mine episodic memories.
 - `hrag taxonomy build` · `hrag taxonomy show` · `hrag taxonomy clear` — build/inspect/drop the hierarchical category tree.
-- `hrag gui` — launch the Streamlit dashboard (Chat · Memories · 🌳 Taxonomy · Documents · Profile · Users · Sessions · Stats).
+- `hrag web` — launch the FastAPI web chat UI (streaming, sources, sessions, memories, taxonomy, feedback).
 
 ## Configuration
 
@@ -163,7 +163,7 @@ hrag chat --reranker batched_llm                         # 1 LLM rerank call ins
 | `kg_ppr` | NER → seeds → Personalized PageRank over the KG → passage hydration (HippoRAG-style) | Multi-hop reasoning across entities | Requires `kg.enabled: true` + ingest pass |
 | `community` | Search GraphRAG community summaries | Best for global / sensemaking queries | Requires `kg.use_communities: true` |
 | `router` | LLM classifies query → routes to kg_ppr / community / hybrid, RRF-fuses cross-doc paths | Auto-picks the right backend per query | One extra LLM call per query (cached) |
-| `taxonomy` *(default)* | Beam-search a user-editable category tree, then chunk-fetch from the few docs at the picked leaves | Scales to many docs; emits a visual descent trace; tree is editable in the GUI | Needs an initial `hrag taxonomy build`; falls back to `taxonomy.fallback_retriever` (default `vector`) when the tree is empty |
+| `taxonomy` *(default)* | Beam-search a user-editable category tree, then chunk-fetch from the few docs at the picked leaves | Scales to many docs; emits a visual descent trace; tree is editable in the web GUI | Needs an initial `hrag taxonomy build`; falls back to `taxonomy.fallback_retriever` (default `vector`) when the tree is empty |
 
 ### Rerankers
 
@@ -189,7 +189,7 @@ Once you have more than a handful of documents, brute-force vector search become
 How it works:
 
 1. **One-time build** (`hrag taxonomy build`) — every doc + memory gets a one-line summary; their (title + summary) embeddings are clustered by an LLM into a labelled tree (root → branches → leaves). Each leaf holds a small set of docs.
-2. **Edit in the GUI** (`hrag gui` → 🌳 Taxonomy) — rename labels, move nodes, split a leaf, delete a category, unfile a doc. The tree is yours; the LLM only proposes.
+2. **Edit in the GUI** (`hrag web` → 🌳 Taxonomy) — rename labels, move nodes, split a leaf, delete a category, unfile a doc. The tree is yours; the LLM only proposes.
 3. **At query time** — embed the question, beam-descend from root by cosine similarity against each node's centroid, stop when you've reached a leaf. Then run normal chunk retrieval **scoped to just the docs at the picked leaves** (typically 1–4 docs). The beam keeps the top-B branches at each level so multi-topic queries still work.
 4. **Visual trace** — every chat reply has a collapsible **🌳 Tree navigation** block under the answer that shows which branches were considered vs kept at each level, with cosine scores.
 
@@ -244,7 +244,7 @@ The dominant cost on local hardware is the **answer generation LLM**, not retrie
 ┌──────────────────────────────────────────────────────────────────┐
 │  CLI (chat REPL · /remember · hrag taxonomy build · /sources)    │
 ├──────────────────────────────────────────────────────────────────┤
-│  GUI (Streamlit · Chat · Memories · 🌳 Taxonomy · Documents · …) │
+│  Web (FastAPI SPA · streaming chat · sources · taxonomy · …)    │
 ├──────────────────────────────────────────────────────────────────┤
 │  Orchestrator (Gate → Router → Retriever → Rerank → LLM)         │
 ├──────────────────────────────────────────────────────────────────┤
@@ -268,7 +268,7 @@ Every layer has a single small Python module. To swap a layer (e.g. trade Chroma
 
 ```
 src/hrag/
-├── cli.py                       # click-based CLI (incl. hrag taxonomy / hrag remember / hrag gui)
+├── cli.py                       # click-based CLI (incl. hrag taxonomy / hrag remember / hrag web)
 ├── orchestrator.py              # main pipeline
 ├── config.py                    # pydantic config + env overrides
 ├── types.py                     # Document, Chunk, RetrievalResult, ...
@@ -305,9 +305,9 @@ src/hrag/
 │   ├── store.py                 # TaxonomyStore (CRUD + centroids + beam descend)
 │   ├── builder.py               # TaxonomyBuilder (LLM-proposed tree)
 │   └── assigner.py              # DocAssigner (cosine + LLM tiebreak)
-├── gui/                         # Streamlit dashboard
-│   ├── app.py · state.py
-│   └── pages/                   # Chat · Memories · Documents · Profile · Users · Sessions · Stats · 🌳 Taxonomy
+├── web/                         # FastAPI SPA (chat + admin)
+│   ├── app.py                   # routes + SSE
+│   └── static/                  # index.html · app.js · styles.css
 ├── prompts/                     # all prompt templates as .md
 │   ├── answer.md                # RAFT-style CoT with ##begin_quote## ... ##end_quote##
 │   ├── rerank.md

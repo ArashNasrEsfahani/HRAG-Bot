@@ -54,7 +54,6 @@ class VectorStore(Protocol):
 
 _SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}
 _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
-_EMBED_BATCH_SIZE = 8  # Smaller batches → more frequent progress events (was 32)
 
 
 def _mean_embedding(embeddings: list[list[float]]) -> list[float] | None:
@@ -348,7 +347,23 @@ class IngestPipeline:
                     dedup_enabled=getattr(self.config.kg, "dedup_enabled", True),
                     progress_cb=progress_cb,
                 )
+                # Bracket extraction with start/done events so the UI progress
+                # bar can show movement during this long phase. Per-chunk
+                # advancement is emitted from inside extract_batch.
+                kg_total = len(chunks) or 1
+                _emit(
+                    "kg_extract",
+                    message="Extracting triples",
+                    n_done=0,
+                    n_total=kg_total,
+                )
                 triples = extractor.extract_batch(chunks)
+                _emit(
+                    "kg_extract",
+                    message=f"Extracted {len(triples)} triples",
+                    n_done=kg_total,
+                    n_total=kg_total,
+                )
                 chunk_id_to_doc_id = {c.chunk_id: c.doc_id for c in chunks}
                 self.kg_store.upsert_triples(doc.user_id, doc.doc_id, triples, chunk_id_to_doc_id)
                 print(f"[ingest] {doc.title}: {len(triples)} triples extracted")
@@ -556,10 +571,11 @@ class IngestPipeline:
         _emit("embed", message="Embedding", n_done=0, n_total=n_total)
 
         embedded = 0
+        embed_batch_size = self.config.embeddings.embed_batch_size
         for batch_index, batch_start in enumerate(
-            range(0, len(texts), _EMBED_BATCH_SIZE)
+            range(0, len(texts), embed_batch_size)
         ):
-            batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
+            batch = texts[batch_start : batch_start + embed_batch_size]
             batch_embeddings = self.embedder.embed(batch)
             all_embeddings.extend(batch_embeddings)
             embedded += len(batch)

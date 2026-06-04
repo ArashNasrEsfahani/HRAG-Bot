@@ -87,3 +87,43 @@ def run_migrations(db: "Database") -> None:
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
             raise
+
+    # Phase 12: per-node keywords for hybrid taxonomy routing (JSON list TEXT).
+    # Additive, idempotent. Absent column on pre-Phase-12 DBs is tolerated by
+    # _row_to_node (treats missing/NULL as []). The table itself may not exist
+    # on pre-Phase-3 schemas — swallow that case.
+    try:
+        with db.conn:
+            db.conn.execute("ALTER TABLE kg_taxonomy_nodes ADD COLUMN keywords TEXT")
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "duplicate column name" not in msg and "no such table" not in msg:
+            raise
+
+    # Phase 10 fix: backfill kg_taxonomy_nodes.is_leaf for nodes wrongly
+    # stored as is_leaf=0 by the pre-fix `POST /api/taxonomy/nodes` default.
+    # A node with NO children is structurally a leaf, period — flip it.
+    # Conversely, any node that has at least one child must be is_leaf=0.
+    # The UPDATE is idempotent (setting a value to itself is a no-op) and
+    # safe to run every startup. The `parent_id IS NOT NULL` guard preserves
+    # the root row's existing is_leaf flag (roots are special).
+    try:
+        with db.conn:
+            db.conn.execute(
+                "UPDATE kg_taxonomy_nodes SET is_leaf = 1 "
+                "WHERE parent_id IS NOT NULL "
+                "AND node_id NOT IN ("
+                "    SELECT DISTINCT parent_id FROM kg_taxonomy_nodes "
+                "    WHERE parent_id IS NOT NULL"
+                ")"
+            )
+            db.conn.execute(
+                "UPDATE kg_taxonomy_nodes SET is_leaf = 0 "
+                "WHERE node_id IN ("
+                "    SELECT DISTINCT parent_id FROM kg_taxonomy_nodes "
+                "    WHERE parent_id IS NOT NULL"
+                ")"
+            )
+    except sqlite3.OperationalError:
+        # Pre-Phase-3 schemas without kg_taxonomy_nodes — skip silently.
+        pass

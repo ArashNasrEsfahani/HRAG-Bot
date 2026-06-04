@@ -67,7 +67,15 @@ from hrag.gating.combined import CombinedPreflight, PreflightDecision
 from hrag.gating.gate import RAGate
 from hrag.gating.uncertain import extract_uncertain_spans, render_uncertain, strip_uncertain
 from hrag.ingest.pipeline import IngestPipeline
-from hrag.intent import Intent, IntentClassifier, IntentVerdict
+from hrag.intent import (
+    Intent,
+    IntentClassifier,
+    IntentVerdict,
+    ReflectiveClassifier,
+    has_self_reference,
+    is_reflective_query,
+    is_reflective_strict,
+)
 from hrag.interaction import InteractionStore, ReviewDecision, maybe_pause
 from hrag.prompts_registry import PromptRegistry
 from hrag.providers.embeddings import get_embedding_provider
@@ -282,6 +290,9 @@ class Orchestrator:
             from hrag.taxonomy.store import TaxonomyStore  # noqa: PLC0415
 
             self.taxonomy_store = TaxonomyStore(self.db, self.embedder)
+            # Phase 12 — disable the in-memory node cache if configured off.
+            if not getattr(config.taxonomy, "cache_tree_in_memory", True):
+                self.taxonomy_store.cache_ttl_s = 0.0
 
         # Retriever and reranker selected by config
         self.retriever: Retriever = build_retriever(
@@ -335,6 +346,9 @@ class Orchestrator:
             min_confidence=config.memory.profile_min_confidence,
         )
         self.memory_store = EpisodicMemoryStore(self.db, self.ingest)
+        # Phase 11.1 — lazy reflective LLM judge (hybrid mode fallback). Built
+        # on first need so off/regex modes never construct it.
+        self._reflective_classifier: Optional[ReflectiveClassifier] = None
         self.auto_extractor = None
         if config.memory.auto_extract:
             from hrag.memory.auto_extract import SessionAutoExtractor  # noqa: PLC0415
@@ -432,8 +446,8 @@ class Orchestrator:
         # when the previous turn was PERSONAL and the new message mentions
         # any tracked entity (e.g. "Mahmoud"), we short-circuit to PERSONAL
         # without an LLM call. The dict is bounded per-session and the
-        # whole tracker is process-local — fine for a single-user Streamlit
-        # / FastAPI process. Persistence across restarts is intentionally
+        # whole tracker is process-local — fine for a single-user FastAPI
+        # process. Persistence across restarts is intentionally
         # NOT provided: the entities will be re-extracted from retrieved
         # memories on the first PERSONAL turn after a restart.
         from hrag.intent import ENTITY_TRACKER_CAP as _ENTITY_CAP  # noqa: PLC0415
@@ -447,7 +461,7 @@ class Orchestrator:
         # Boot self-test: exercise the classifier's fast-path against a
         # golden set ("what is hipporag" → FACTUAL, "what's my name" →
         # PERSONAL, …). Mismatches are surfaced as one logger.warning line
-        # — discoverable in the streamlit log if a fast-path rule regresses.
+        # — discoverable in the server log if a fast-path rule regresses.
         _self_test_failures = self.intent_classifier.self_test()
         if _self_test_failures:
             logger.warning(
@@ -463,6 +477,12 @@ class Orchestrator:
         # Delegated to a private method so tests can call it on a MagicMock
         # instance without spinning up a full Orchestrator.
         self._maybe_warmup_llm(config)
+
+        # Phase 10 — refuse to start when the stored embedding dim disagrees
+        # with cfg.embeddings.dim. Catches model-swap-without-reingest before
+        # any retrieval occurs so the user gets a clear error instead of
+        # silent garbage results.
+        self._check_embedding_dim_match()
 
     # ------------------------------------------------------------------
     # Phase 6-B1 — per-intent retriever resolver
@@ -814,6 +834,44 @@ class Orchestrator:
                 question, late_history
             )
 
+        # 3d-pre. Phase 11.1 — reflective / opinion personal questions.
+        # "What do you think about me?" wants an *impression* synthesised from
+        # everything we know, not a recital of one saved fact. Detection is
+        # switchable (cfg.retrieval.reflection_mode: off|regex|hybrid) and the
+        # precision is asymmetric:
+        #   * COERCION (override a non-PERSONAL verdict) requires a HIGH-precision
+        #     signal — strict regex or the LLM judge — so "describe me a function"
+        #     (FACTUAL) is never hijacked.
+        #   * WITHIN an already-PERSONAL turn we accept the looser recall-tier
+        #     match, where a false positive is cheap (synthesis vs recital).
+        mode = getattr(cfg.retrieval, "reflection_mode", "hybrid")
+        strict_hit = mode != "off" and is_reflective_strict(question)
+        loose_hit = mode != "off" and is_reflective_query(question)
+        llm_hit = (
+            mode == "hybrid"
+            and not strict_hit
+            and (intent == Intent.PERSONAL or has_self_reference(question))
+            and self._reflective_llm_signal(question, history_rows, preflight_decision)
+        )
+        if mode != "off" and intent != Intent.PERSONAL and (strict_hit or llm_hit):
+            logger.info(
+                "reflective query coerced intent %s -> personal: %r",
+                intent.value, question[:80],
+            )
+            intent = Intent.PERSONAL
+        reflective_turn = (
+            mode != "off"
+            and intent == Intent.PERSONAL
+            and (loose_hit or strict_hit or llm_hit)
+        )
+        _emit("reflective_check", {
+            "mode": mode,
+            "strict": strict_hit,
+            "loose": loose_hit,
+            "llm": llm_hit,
+            "reflective": reflective_turn,
+        })
+
         # 3d. Retrieval-policy dispatch.
         plan: RetrievalPlan = self.retrieval_policy.plan(intent)
         _emit("intent_route", {
@@ -822,6 +880,28 @@ class Orchestrator:
             "top_k": plan.top_k_override,
             "source_types": plan.source_types,
         })
+
+        # 3d-bis. Phase 11 — reflective-turn query augmentation.
+        # When the turn is reflective (detected above), augment the retrieval
+        # query with the user's saved-profile terms so document chunks about
+        # them clear reranking — an opinion-shaped query alone matches them
+        # poorly. The render section further down chooses the synthesis prompt.
+        if reflective_turn:
+            profile_terms = ""
+            try:
+                profile_terms = self.profile_store.render(user_id)
+            except Exception:  # noqa: BLE001
+                profile_terms = ""
+            if profile_terms and profile_terms != "(no profile yet)":
+                # Flatten the multi-line profile render into query terms so the
+                # retriever pulls document chunks that mention the user's known
+                # facts (employer, research topics, …) alongside the question.
+                flat_profile = " ".join(profile_terms.split())
+                retrieval_query = f"{question} {flat_profile}"
+            _emit("reflective_personal", {
+                "augmented": retrieval_query != question,
+                "query": retrieval_query[:120],
+            })
 
         # 3d-0. Phase 6 — adaptive top_k resolver.
         # No-op when ``retrieval.adaptive_enabled`` is False (returns the global
@@ -1003,7 +1083,16 @@ class Orchestrator:
             # the per-intent value (widened by 2x for reranker slack); else the
             # global default. Falls back defensively if the resolver somehow
             # returned None on a non-skip path.
-            full_vec_k = adaptive_vec_k if adaptive_vec_k is not None else cfg.retrieval.top_k_vector
+            # Precedence: adaptive per-intent value (when enabled) > the
+            # policy's per-intent override (e.g. PERSONAL → cfg.personal_top_k)
+            # > the global default. PERSONAL is the only intent that sets an
+            # override today, so FACTUAL is unchanged (override is None there).
+            if adaptive_vec_k is not None:
+                full_vec_k = adaptive_vec_k
+            elif plan.top_k_override is not None:
+                full_vec_k = plan.top_k_override
+            else:
+                full_vec_k = cfg.retrieval.top_k_vector
             full_final_k = adaptive_final_k if adaptive_final_k is not None else cfg.retrieval.top_k_final
 
             # Phase 7-A — math-meta filter. When the query asks about
@@ -1207,6 +1296,30 @@ class Orchestrator:
                         "input": organized_count_before,
                         "output": len(results),
                         "dropped": organized_count_before - len(results),
+                    })
+
+            # Phase 6 — episodic bias for PERSONAL turns. PERSONAL now routes
+            # through this "full" scope (so uploaded documents are searched too),
+            # so the stable-sort that floats saved memories above documents must
+            # run here, AFTER rerank/organize, rather than in the (now-unused)
+            # episodic branch below. No-op unless adaptive + the bias flag are on
+            # and the turn is PERSONAL.
+            episodic_bias_on = (
+                cfg.retrieval.adaptive_enabled
+                and cfg.retrieval.adaptive_personal_episodic_bias
+                and intent == Intent.PERSONAL
+            )
+            if episodic_bias_on and results:
+                episodic_count = sum(
+                    1 for r in results if r.chunk.source_type == "episodic"
+                )
+                results.sort(
+                    key=lambda r: 0 if r.chunk.source_type == "episodic" else 1
+                )
+                if episodic_count > 0:
+                    _emit("episodic_bias_applied", {
+                        "episodic_count": episodic_count,
+                        "total": len(results),
                     })
 
         elif plan.scope == "episodic":
@@ -1639,6 +1752,36 @@ class Orchestrator:
                 question=question,
                 detail_hint=_detail_hint(question),
             )
+        elif intent == Intent.PERSONAL and reflective_turn:
+            # Phase 11 — reflective impression. Synthesise from profile +
+            # memories + whatever document chunks survived, rather than
+            # reciting one fact and offering to search. We deliberately feed
+            # ALL retrieved material (episodic AND document) so the model has
+            # the richest possible picture; the prompt is responsible for
+            # forming a grounded opinion without inventing facts.
+            episodic_results = [
+                r for r in results
+                if getattr(r.chunk, "source_type", "") == "episodic"
+            ]
+            doc_results = [
+                r for r in results
+                if getattr(r.chunk, "source_type", "") != "episodic"
+            ]
+            memories_block = (
+                _format_passages(episodic_results)
+                if episodic_results else "(nothing saved yet)"
+            )
+            docs_block = (
+                _format_passages(doc_results)
+                if doc_results else "(no documents matched)"
+            )
+            prompt = self.prompts.render_personal_reflect(
+                user_profile=user_profile,
+                retrieved_memories=memories_block,
+                retrieved_docs=docs_block,
+                conversation_history=conversation_history,
+                question=question,
+            )
         elif intent == Intent.PERSONAL:
             # Phase 8.2: dispatch to a sibling "empty" template when we
             # genuinely have nothing on file — no memories AND no profile.
@@ -2035,6 +2178,30 @@ class Orchestrator:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _reflective_llm_signal(
+        self,
+        question: str,
+        history_rows: list[tuple[str, str]],
+        preflight_decision: Optional[PreflightDecision],
+    ) -> bool:
+        """Hybrid-mode LLM reflective signal.
+
+        Prefers the free signal from the combined preflight when it supplied a
+        ``reflective`` field this turn; otherwise lazily builds and consults a
+        cached :class:`ReflectiveClassifier` (one tiny yes/no call). The caller
+        only invokes this when the regex tiers missed and the turn is plausibly
+        personal, so the LLM cost stays on the rare ambiguous tail.
+        """
+        if preflight_decision is not None and preflight_decision.reflective is not None:
+            return bool(preflight_decision.reflective)
+        if self._reflective_classifier is None:
+            try:
+                self._reflective_classifier = ReflectiveClassifier(self.llm)
+            except Exception:  # noqa: BLE001
+                logger.exception("ReflectiveClassifier construction failed")
+                return False
+        return self._reflective_classifier.classify(question, history=history_rows)
+
     def _create_session(self, session_id: str, user_id: str) -> None:
         with self.db.conn:
             self.db.execute(
@@ -2175,6 +2342,42 @@ class Orchestrator:
                 getattr(cfg.llm, "warmup_on_init", True),
                 getattr(self.llm, "name", "unknown"),
             )
+
+    # ------------------------------------------------------------------
+    # Phase 10 — embedding dim mismatch guard
+    # ------------------------------------------------------------------
+
+    def _check_embedding_dim_match(self) -> None:
+        """Refuse to start when the stored index dim disagrees with cfg.embeddings.dim.
+
+        Reads one vector from the populated chunks collection via the backend's
+        ``dim()`` helper. Skips silently when the collection is empty (fresh
+        install or pre-ingest state) so the check is a true no-op on first run.
+
+        Raises :class:`RuntimeError` with a clear re-ingest command when a
+        mismatch is detected. Any other unexpected error (e.g. the backend is a
+        test stub without a real ``dim()`` implementation) is caught and logged
+        at WARNING so tests and non-Chroma paths are never broken by this guard.
+        """
+        try:
+            backend = self.vector_store._backend
+            stored_dim = backend.dim()
+            if stored_dim is None:
+                # Collection is empty or backend cannot introspect dim — skip.
+                return
+            configured_dim: int = self.config.embeddings.dim
+            if stored_dim != configured_dim:
+                raise RuntimeError(
+                    f"Embedding dim mismatch: the index has dim={stored_dim} but "
+                    f"config.embeddings.dim={configured_dim}. The embedding model "
+                    f"was changed without re-ingesting the corpus. Run:\n"
+                    f"  hrag init --wipe && hrag ingest <your-corpus>\n"
+                    f"to rebuild the index under the new model."
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("[orchestrator] dim-check skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------

@@ -85,3 +85,21 @@ class ChromaBackend:
 
     def count(self) -> int:
         return int(self._collection.count())
+
+    def dim(self) -> Optional[int]:
+        """Return the stored embedding dimensionality, or None when the collection is empty.
+
+        Uses ``collection.peek(1)`` to read one vector and measures its length.
+        Chroma's ``peek`` never raises on an empty collection — it just returns
+        an empty embeddings list — so this is safe to call at any time.
+        """
+        try:
+            if self._collection.count() == 0:
+                return None
+            peek = self._collection.peek(1)
+            embs = peek.get("embeddings")
+            if not embs or not embs[0]:
+                return None
+            return len(embs[0])
+        except Exception:  # noqa: BLE001 — any Chroma hiccup → unknown dim
+            return None

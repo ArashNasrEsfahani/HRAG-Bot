@@ -122,11 +122,19 @@ class DocAssigner:
         *,
         summary: Optional[str] = None,
         centroid: Optional[list[float]] = None,
+        refresh_centroids: bool = True,
     ) -> Optional[str]:
         """Route the doc to a leaf and persist the assignment.
 
         Returns the chosen leaf's ``node_id``, or ``None`` if the tree is
         empty or no centroid could be computed.
+
+        When ``refresh_centroids`` is True (default), the chosen leaf's
+        centroid (and every ancestor up to root) is recomputed so that
+        future ``beam_descend`` queries can route to the new doc. Pass
+        False from bulk paths (``assign_all``) that finish with a single
+        ``recompute_all_centroids`` to avoid concurrent ancestor-write
+        races between worker threads.
         """
         tree = self._get_tree(user_id)
         if not tree["root"] or not tree["children_of"].get(tree["root"]):
@@ -159,6 +167,7 @@ class DocAssigner:
         if primary_leaf is None:
             return None
 
+        primary_ok = False
         try:
             self._store.assign_doc(
                 user_id,
@@ -167,12 +176,14 @@ class DocAssigner:
                 score=float(primary_score),
                 is_primary=True,
             )
+            primary_ok = True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "assign_doc(%s -> %s) failed: %s", doc_id, primary_leaf.node_id, exc
             )
 
         # Optional secondary assignment for multi-topic docs.
+        secondary_leaf_id: Optional[str] = None
         if getattr(self._cfg, "allow_secondary_assignment", False) and runner_up is not None:
             runner_node, runner_score = runner_up
             if runner_score >= primary_score - _SECONDARY_GAP:
@@ -184,6 +195,7 @@ class DocAssigner:
                         score=float(runner_score),
                         is_primary=False,
                     )
+                    secondary_leaf_id = runner_node.node_id
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "secondary assign_doc(%s -> %s) failed: %s",
@@ -191,6 +203,18 @@ class DocAssigner:
                         runner_node.node_id,
                         exc,
                     )
+
+        # Refresh centroids on the affected leaf-to-root path(s). Without
+        # this, the leaf's ``centroid`` column stays NULL after on-ingest
+        # auto-assign, so ``TaxonomyStore.beam_descend`` scores the leaf
+        # at ``min_score - 1.0`` and prunes its whole branch on every
+        # future query — i.e. the doc is silently unreachable via taxonomy
+        # retrieval. ``recompute_node_centroid`` also refreshes the stale
+        # ``doc_count`` column the GUI shows.
+        if refresh_centroids and primary_ok:
+            self._refresh_path_to_root(user_id, primary_leaf.node_id)
+            if secondary_leaf_id is not None:
+                self._refresh_path_to_root(user_id, secondary_leaf_id)
 
         return primary_leaf.node_id
 
@@ -269,7 +293,10 @@ class DocAssigner:
         def _work(doc_id: str) -> tuple[str, Optional[str], float]:
             t_w = time.monotonic()
             try:
-                node_id = self.assign(user_id, doc_id)
+                # Skip per-doc centroid refresh — concurrent worker threads
+                # can race on shared ancestors. We pay one bulk recompute
+                # after the pool drains (below).
+                node_id = self.assign(user_id, doc_id, refresh_centroids=False)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("assign(%s) failed: %s", doc_id, exc)
                 return doc_id, None, 0.0
@@ -303,6 +330,16 @@ class DocAssigner:
                         node_id=node_id,
                         score=score,
                     )
+
+        # Single bulk centroid refresh after every worker is done. The
+        # per-doc path is gated off in `_work` to avoid concurrent ancestor
+        # writes; without this the leaves remain centroid-less and queries
+        # can't route to anything just assigned.
+        if assigned > 0:
+            try:
+                self._store.recompute_all_centroids(user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("recompute_all_centroids after assign_all failed: %s", exc)
 
         _p("done",
            n_assigned=assigned,
@@ -388,7 +425,14 @@ class DocAssigner:
                     need_tiebreak = True
 
             if need_tiebreak and second is not None:
-                pick = self._llm_tiebreak(query_text, [top_node, second[0]])
+                # Phase 12 — try the cheap keyword signal first. When the doc's
+                # keywords clearly favour one candidate, skip the LLM tiebreak
+                # entirely (speed + cost win, esp. on the gemma-only/8 GB setup).
+                kw_pick = self._keyword_tiebreak(query_text, top_node, second[0])
+                if kw_pick is not None:
+                    pick = kw_pick
+                else:
+                    pick = self._llm_tiebreak(query_text, [top_node, second[0]])
                 if pick == 1:
                     chosen, chosen_score = second
                     runner = (top_node, top_score)
@@ -427,6 +471,41 @@ class DocAssigner:
             out.append((c, _cosine(centroid, list(c.centroid))))
         return out
 
+    def _keyword_tiebreak(
+        self,
+        query_text: str,
+        top_node: "TaxonomyNode",
+        second_node: "TaxonomyNode",
+    ) -> Optional[int]:
+        """Resolve a tiebreak via keyword overlap, or None if inconclusive.
+
+        Returns 0 (keep top), 1 (prefer second), or None when the keyword
+        signal can't separate them (caller then falls back to the LLM). Pure +
+        cheap. No-op unless ``keyword_tiebreak_skip`` and keyword routing are on
+        and both candidates carry keywords.
+        """
+        if not getattr(self._cfg, "keyword_tiebreak_skip", False):
+            return None
+        if not getattr(self._cfg, "keyword_routing_enabled", False):
+            return None
+        kw_top = list(getattr(top_node, "keywords", []) or [])
+        kw_second = list(getattr(second_node, "keywords", []) or [])
+        if not kw_top and not kw_second:
+            return None
+        from hrag.taxonomy.keywords import keyword_overlap, tokenize  # local import
+
+        q_kw = tokenize(query_text)
+        if not q_kw:
+            return None
+        ov_top = keyword_overlap(q_kw, kw_top)
+        ov_second = keyword_overlap(q_kw, kw_second)
+        # Require a clear margin so we only short-circuit the LLM when the
+        # keyword signal is genuinely decisive.
+        margin = 0.15
+        if abs(ov_top - ov_second) < margin:
+            return None
+        return 0 if ov_top >= ov_second else 1
+
     def _llm_tiebreak(
         self,
         query_text: str,
@@ -461,6 +540,48 @@ class DocAssigner:
         if idx < 0 or idx >= len(candidates):
             return 0
         return idx
+
+    # ------------------------------------------------------------------
+    # Internal: refresh centroids along the chosen leaf-to-root path
+    # ------------------------------------------------------------------
+
+    def _refresh_path_to_root(self, user_id: str, leaf_node_id: str) -> None:
+        """Recompute the leaf's centroid, then walk up to root.
+
+        Each call updates `centroid`/`centroid_dim`/`doc_count` on the row
+        so beam_descend can score against it. Walks ancestors via
+        ``store.get_node`` because the local tree cache stores
+        immutable snapshots (its centroids would be stale after the
+        first hop).
+        """
+        try:
+            self._store.recompute_node_centroid(user_id, leaf_node_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("recompute_node_centroid(%s) failed: %s", leaf_node_id, exc)
+            return
+
+        # Invalidate the cached tree topology — its centroids are now stale.
+        self._tree_cache = None
+
+        node = self._store.get_node(leaf_node_id)
+        if node is None:
+            return
+        cursor_parent = node.parent_id
+        # Hard bound on tree depth to avoid runaway loops on malformed data.
+        for _ in range(_MAX_DESCENT_DEPTH):
+            if cursor_parent is None:
+                break
+            try:
+                self._store.recompute_node_centroid(user_id, cursor_parent)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "recompute_node_centroid(%s) failed: %s", cursor_parent, exc
+                )
+                break
+            parent_node = self._store.get_node(cursor_parent)
+            if parent_node is None:
+                break
+            cursor_parent = parent_node.parent_id
 
     # ------------------------------------------------------------------
     # Internal: build summary + centroid for a doc on demand

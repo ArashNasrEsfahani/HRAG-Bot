@@ -370,6 +370,12 @@ class ContextualAugmenter:
                     {
                         "i": completed_i + 1,
                         "n": n,
+                        # Mirror i/n as the canonical n_done/n_total keys the
+                        # web job-state writer reads; without these the UI
+                        # progress bar can't advance during this phase.
+                        "n_done": completed_i + 1,
+                        "n_total": n,
+                        "message": f"Augmented {completed_i + 1}/{n} chunks",
                         "chunk_id": chunk.chunk_id,
                         "from_cache": from_cache,
                         "ok": ok,

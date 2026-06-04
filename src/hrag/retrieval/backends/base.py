@@ -66,3 +66,13 @@ class VectorBackend(Protocol):
     def count(self) -> int:
         """Return total record count (for diagnostics / status pages)."""
         ...
+
+    def dim(self) -> Optional[int]:
+        """Return the embedding dimensionality stored in the index, or None if empty.
+
+        Used by :meth:`Orchestrator._check_embedding_dim_match` at startup to
+        detect a model-swap-without-reingest situation before any retrieval occurs.
+        Backends that cannot introspect the dim cheaply should return ``None``
+        (the check is silently skipped).
+        """
+        ...

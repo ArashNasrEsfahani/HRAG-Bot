@@ -11,6 +11,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
   <link id="hljs-style" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/styles/github-dark.min.css" />
+  <!-- KaTeX for math typesetting (formula-heavy corpus) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
 </head>
 <body>
   <div id="app" class="app collapsed-mobile">
@@ -60,6 +62,16 @@
           </svg>
           <span>Taxonomy</span>
           <span class="nav-count" id="tax-count">—</span>
+        </button>
+        <button class="nav-btn" id="open-profile" title="Profile & preferences">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/></svg>
+          <span>Profile</span>
+          <span class="nav-count" id="profile-count">—</span>
+        </button>
+        <button class="nav-btn" id="open-kg" title="Knowledge graph">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="7" r="2"/><circle cx="12" cy="17" r="2"/><path d="M6.7 7.2 10.5 15M17.6 8.5 13.4 15.3M7 6.2 17 6.8"/></svg>
+          <span>Graph</span>
+          <span class="nav-count" id="kg-count">—</span>
         </button>
       </div>
 
@@ -294,6 +306,15 @@
             <input type="checkbox" id="cfg-rerank-enabled" />
             <span class="track"><span class="thumb"></span></span>
           </label>
+          <label class="field">
+            <span>Reflection mode</span>
+            <select id="cfg-reflection-mode">
+              <option value="hybrid">hybrid (regex + LLM)</option>
+              <option value="regex">regex only</option>
+              <option value="off">off</option>
+            </select>
+          </label>
+          <div class="hint">How "what do you think about me?" is detected. Hybrid adds an LLM check when the regex misses; regex stays deterministic; off disables it.</div>
         </section>
 
         <section class="drawer-section">
@@ -574,12 +595,95 @@
           Across <b id="fb-sessions-num">0</b> sessions.
         </div>
 
+        <div class="fb-section-label">Export training data</div>
+        <div class="fb-export-row">
+          <button class="tax-btn" id="fb-export-all" title="Download all rated turns as JSONL">⬇ All (JSONL)</button>
+          <button class="tax-btn" id="fb-export-up" title="Download 👍 turns">⬇ 👍</button>
+          <button class="tax-btn" id="fb-export-down" title="Download 👎 turns">⬇ 👎</button>
+        </div>
+
         <div class="fb-section-label">Top 👎 messages</div>
         <div id="fb-negatives"></div>
       </div>
     </aside>
 
+    <aside class="drawer drawer-wide" id="profile-drawer">
+      <div class="drawer-head">
+        <h2>Profile &amp; preferences</h2>
+        <div style="display:inline-flex; gap:6px; align-items:center">
+          <button class="icon-btn" id="profile-extract" title="Mine preferences from recent sessions" aria-label="Extract">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M5 10l7-7 7 7"/></svg>
+          </button>
+          <button class="icon-btn" id="refresh-profile" title="Refresh" aria-label="Refresh">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3.36-7"/><path d="M21 4v6h-6"/></svg>
+          </button>
+          <button class="icon-btn" id="close-profile" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="drawer-body">
+        <div class="profile-rendered" id="profile-rendered"></div>
+        <div class="profile-add">
+          <select id="profile-polarity">
+            <option value="fact">fact</option>
+            <option value="style">style</option>
+            <option value="like">like</option>
+            <option value="dislike">dislike</option>
+          </select>
+          <input type="text" id="profile-topic" placeholder="topic (e.g. employer)" />
+          <input type="text" id="profile-value" placeholder="value (e.g. KareOne)" />
+          <button class="tax-btn tax-btn-primary" id="profile-add-btn">Add</button>
+        </div>
+        <div id="profile-list"></div>
+      </div>
+    </aside>
+
     <div class="drawer-scrim" id="drawer-scrim"></div>
+
+    <!-- ===== Knowledge graph (full-screen) ===== -->
+    <main class="graph-page" id="kg-page" aria-hidden="true">
+      <header class="tax-toolbar">
+        <button class="icon-btn" id="kg-back" title="Back to chat" aria-label="Back">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="tax-title">
+          <span class="tax-title-main">Knowledge graph</span>
+          <span class="tax-title-sub" id="kg-stats-sub">—</span>
+        </div>
+        <div class="tax-toolbar-spacer"></div>
+        <label class="kg-toolbar-field" title="Max nodes (by degree)">
+          <span>nodes</span>
+          <select id="kg-limit">
+            <option value="150">150</option>
+            <option value="300" selected>300</option>
+            <option value="600">600</option>
+            <option value="1000">1000</option>
+          </select>
+        </label>
+        <label class="kg-toolbar-field" title="Which node layer to show">
+          <select id="kg-type">
+            <option value="phrase" selected>phrases</option>
+            <option value="all">all</option>
+          </select>
+        </label>
+        <button class="tax-btn tax-btn-primary" id="kg-reload" title="Reload graph">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3.36-7"/><path d="M21 4v6h-6"/></svg>
+          <span>Reload</span>
+        </button>
+      </header>
+      <section class="tax-canvas" id="kg-canvas">
+        <svg id="kg-svg"><g id="kg-zoom-layer"><g id="kg-links-layer"></g><g id="kg-nodes-layer"></g></g></svg>
+        <div class="tax-empty" id="kg-empty" hidden>
+          <div class="tax-empty-card">
+            <h3>No knowledge graph yet</h3>
+            <p>Enable <code>kg.enabled</code> and run <code>hrag rebuild-kg</code> (or ingest with KG on) to populate the graph.</p>
+          </div>
+        </div>
+        <div class="tax-loading" id="kg-loading" hidden><span class="shimmer"></span></div>
+        <div class="kg-tooltip" id="kg-tooltip" hidden></div>
+      </section>
+    </main>
 
     <!-- ===== Taxonomy editor (full-screen) ===== -->
     <main class="taxonomy-page" id="taxonomy-page" aria-hidden="true">
@@ -605,6 +709,10 @@
         <button class="tax-btn" id="tax-assign-btn" title="Assign unfiled docs" disabled>
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12l4 4L19 6"/></svg>
           <span>Assign unfiled</span>
+        </button>
+        <button class="tax-btn" id="tax-keywords-btn" title="Generate per-node keywords for hybrid routing">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 7h.01M3 5v4l9 9 4-4-9-9H3z"/><path d="M14 7l7 7-4 4"/></svg>
+          <span>Keywords</span>
         </button>
         <button class="tax-btn tax-btn-primary" id="tax-recompute-btn" title="Recompute taxonomy">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3.36-7"/><path d="M21 4v6h-6"/></svg>
@@ -688,6 +796,9 @@
           </button>
         </div>
         <textarea id="tax-pop-desc" class="tax-pop-desc" placeholder="Description (optional)"></textarea>
+        <div class="tax-pop-kw-label">Keywords <span class="tax-pop-kw-hint" title="Used for hybrid (dense + keyword) routing. Comma-separated.">·  routing</span></div>
+        <div class="tax-pop-kw-chips" id="tax-pop-kw-chips"></div>
+        <input type="text" id="tax-pop-kw-input" class="tax-pop-kw-input" placeholder="add keywords, comma-separated… (Enter to save)" />
         <div class="tax-pop-actions">
           <button class="tax-mini-btn" id="tax-pop-add">＋ child</button>
           <button class="tax-mini-btn tax-mini-btn-danger" id="tax-pop-del">Delete</button>
@@ -766,6 +877,9 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/highlight.min.js"></script>
+  <!-- KaTeX + auto-render: typesets $..$, $$..$$, \(..\), \[..\] in answers -->
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <!-- D3 for the taxonomy editor -->
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="/static/app.js"></script>

@@ -53,10 +53,6 @@ kg = [
     "python-igraph>=0.11",
     "spacy>=3.7",
 ]
-gui = [
-    "streamlit>=1.36",
-    "pandas>=2.0",
-]
 sqlite-vec = [
     "sqlite-vec>=0.1.6",
 ]
@@ -67,8 +63,14 @@ nougat = [
     "nougat-ocr>=0.1",
 ]
 quantize = [
-    "optimum[onnxruntime]>=1.19",
     "onnxruntime>=1.17",
+]
+openvino = [
+    "openvino>=2024.0",
+    "optimum[openvino]>=1.19",
+]
+model2vec = [
+    "model2vec>=0.4",
 ]
 
 [project.scripts]
@@ -78,7 +80,7 @@ hrag = "hrag.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hrag = ["prompts/*.md", "db/*.sql", "gui/pages/*.py"]
+hrag = ["prompts/*.md", "db/*.sql", "web/static/*"]
 
 [tool.ruff]
 line-length = 100

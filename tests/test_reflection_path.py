@@ -1,0 +1,357 @@
+"""Phase 11 / 11.1 — reflective / opinion personal-question path.
+
+Real-user bug: asked "what do you think about me?", the bot recited one saved
+fact ("you work at KareOne") and offered to search the documents — the
+``answer_personal_known.md`` script — instead of forming an impression. The
+question is an opinion request, not a fact lookup.
+
+Phase 11.1 makes detection switchable (``retrieval.reflection_mode`` =
+off|regex|hybrid) and two-tier with asymmetric precision:
+- ``is_reflective_strict`` — high precision, gates *coercion* of a non-PERSONAL
+  verdict (protects "describe me a function").
+- ``is_reflective_query`` — recall tier (strict OR two-factor self-ref × cue),
+  used *within* an already-PERSONAL turn.
+- hybrid mode adds an LLM yes/no fallback (``ReflectiveClassifier`` /
+  combined-preflight ``reflective`` field) when the regex misses.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+from hrag.intent import (
+    Intent,
+    IntentVerdict,
+    has_self_reference,
+    is_reflective_query,
+    is_reflective_strict,
+)
+from hrag.types import Chunk, RetrievalResult
+
+
+# ---------------------------------------------------------------------------
+# 1. Pure detector — strict (coercion-grade) tier
+# ---------------------------------------------------------------------------
+
+
+def test_strict_matches_unambiguous_opinion_shapes() -> None:
+    positives = [
+        "what do you think about me?",
+        "so what do you think about me",
+        "what do you think of me",
+        "what's your opinion of me",
+        "what is your honest impression of me",
+        "your thoughts on me?",
+        "how would you describe me",
+        "how do you see me",
+        "how do I come across",
+        "describe me",
+        "describe me.",
+        "sum me up",
+        "what kind of person am I",
+    ]
+    for q in positives:
+        assert is_reflective_strict(q), q
+
+
+def test_strict_rejects_describe_me_plus_object() -> None:
+    """The bare 'describe me' branch must NOT fire on 'describe me a/the X' —
+    that is a factual request and would be wrongly coerced to PERSONAL."""
+    negatives = [
+        "describe me a function that sorts a list",
+        "describe me a sunset",
+        "describe me the binary search algorithm",
+        "describe me how transformers work",
+        "what do you think about transformers",
+        "what is RAG",
+        "do you know me",
+        "what do you know about me",
+        "",
+    ]
+    for q in negatives:
+        assert not is_reflective_strict(q), q
+
+
+def test_strict_matches_farsi_and_finglish() -> None:
+    assert is_reflective_strict("درباره من چی فکر می‌کنی؟")
+    assert is_reflective_strict("نظرت در مورد من چیه")
+    assert is_reflective_strict("nazaret darbare man chie")
+
+
+def test_zwnj_normalization() -> None:
+    """The ZWNJ and non-ZWNJ spellings of 'how do you see me' both match,
+    even though only the joined form is listed."""
+    assert is_reflective_strict("منو چطور می‌بینی")  # with ZWNJ
+    assert is_reflective_strict("منو چطور میبینی")    # without ZWNJ
+
+
+# ---------------------------------------------------------------------------
+# 2. Pure detector — recall tier (two-factor) + self-reference helper
+# ---------------------------------------------------------------------------
+
+
+def test_recall_tier_adds_two_factor_matches() -> None:
+    # strict shapes still pass …
+    assert is_reflective_query("what do you think about me")
+    # … plus looser two-factor (self-ref AND opinion-cue).
+    assert is_reflective_query("sum me up")
+    assert is_reflective_query("honestly, how do I come across to you")
+    # No opinion cue OR no self-ref → recall tier stays off.
+    assert not is_reflective_query("what do you think about transformers")
+    assert not is_reflective_query("what is my name")
+
+
+def test_has_self_reference() -> None:
+    assert has_self_reference("describe me")
+    assert has_self_reference("what is my GPA")
+    assert has_self_reference("نظرت درباره من")
+    assert not has_self_reference("what is RAG")
+    assert not has_self_reference("describe a binary tree")
+
+
+# ---------------------------------------------------------------------------
+# 3. Prompt registry renders the synthesis template
+# ---------------------------------------------------------------------------
+
+
+def test_personal_reflect_template_renders() -> None:
+    from hrag.prompts_registry import PromptRegistry
+
+    prompts_dir = Path(__file__).resolve().parents[1] / "src" / "hrag" / "prompts"
+    assert (prompts_dir / "answer_personal_reflect.md").exists()
+
+    registry = PromptRegistry(prompts_dir)
+    rendered = registry.render_personal_reflect(
+        user_profile="Facts: employer: KareOne",
+        retrieved_memories="The user is named Arash.",
+        retrieved_docs="Arash researches HCI and ML.",
+        conversation_history="(no prior conversation)",
+        question="what do you think about me?",
+    )
+
+    assert "Facts: employer: KareOne" in rendered
+    assert "Arash researches HCI and ML." in rendered
+    assert "what do you think about me?" in rendered
+    assert "reflective impression" in rendered
+    assert "offer a concrete next step" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator wiring helpers (self-contained stubs)
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedClassifier:
+    def __init__(self, intent: Intent) -> None:
+        self._intent = intent
+
+    def classify(self, text: str, **kwargs) -> IntentVerdict:
+        return IntentVerdict(
+            intent=self._intent, confidence=1.0, source="test",
+            raw_label=self._intent.value,
+        )
+
+
+class _RecordingRetriever:
+    name = "recording"
+
+    def __init__(self, results: list[RetrievalResult]) -> None:
+        self._results = results
+        self.queries: list[str] = []
+
+    def retrieve(self, query, user_id, top_k=10, source_types=None,
+                 intent_hint=None, where=None):
+        self.queries.append(query)
+        return list(self._results)
+
+
+class _PromptCapturingLLM:
+    """Records prompts; answers 'yes' to the reflective-check prompt."""
+
+    name = "prompt-capture"
+
+    def __init__(self, reflective_reply: str = "yes") -> None:
+        self.prompts: list[str] = []
+        self._reflective_reply = reflective_reply
+        self.reflective_calls = 0
+
+    def generate(self, request):
+        from hrag.types import GenerationResponse
+        text = " ".join(m.content for m in request.messages)
+        self.prompts.append(text)
+        return GenerationResponse(text="ok", raw=None)
+
+    def complete(self, prompt, system=None, temperature=None, max_tokens=None):
+        self.prompts.append(prompt)
+        if "reflective / opinion request" in prompt or "reflective/opinion" in prompt:
+            self.reflective_calls += 1
+            return self._reflective_reply
+        if "Intent Classification" in prompt or "Output (one word only)" in prompt:
+            return "personal"
+        if "Score:" in prompt or "0-3" in prompt:
+            return "2"
+        return "ok"
+
+    def generate_stream(self, request):
+        text = " ".join(m.content for m in request.messages)
+        self.prompts.append(text)
+        yield "ok"
+
+
+def _chunk(chunk_id: str, source_type: str, text: str) -> Chunk:
+    return Chunk(
+        chunk_id=chunk_id, doc_id=f"doc_{chunk_id}", user_id="default",
+        text=text, embedding_text=text, title=f"Title-{chunk_id}",
+        section="Section", source_type=source_type,
+    )
+
+
+def _result(chunk_id: str, score: float, source_type: str, text: str,
+            rerank_score: Optional[float] = None) -> RetrievalResult:
+    return RetrievalResult(
+        chunk=_chunk(chunk_id, source_type, text), score=score,
+        rerank_score=rerank_score,
+    )
+
+
+def _make_orch(sample_config, results, classifier_intent: Intent,
+               reflection_mode: str = "hybrid", reflective_reply: str = "yes"):
+    import hrag.db.connection as _conn_mod
+
+    _conn_mod._db_singleton = None
+    sample_config.retrieval.rerank_enabled = False
+    sample_config.retrieval.reflection_mode = reflection_mode
+
+    from hrag.orchestrator import Orchestrator
+
+    orch = Orchestrator(sample_config)
+    llm = _PromptCapturingLLM(reflective_reply=reflective_reply)
+    orch.llm = llm  # type: ignore[assignment]
+    if getattr(orch, "gate", None) is not None:
+        orch.gate.llm = llm
+    if getattr(orch, "clue", None) is not None:
+        orch.clue.llm = llm
+    orch.intent_classifier = _ScriptedClassifier(classifier_intent)  # type: ignore[assignment]
+    retr = _RecordingRetriever(results)
+    orch.retriever = retr  # type: ignore[assignment]
+    return orch, llm, retr
+
+
+def _answer_prompt(llm: _PromptCapturingLLM) -> str:
+    gen = [
+        p for p in llm.prompts
+        if "Intent Classification" not in p
+        and "Output (one word only)" not in p
+        and "Score:" not in p
+        and "0-3" not in p
+        and "reflective / opinion request" not in p
+    ]
+    assert gen, "no generation prompt captured"
+    return gen[-1]
+
+
+def _teardown(orch) -> None:
+    orch.close()
+    import hrag.db.connection as _conn_mod
+    _conn_mod._db_singleton = None
+
+
+# ---------------------------------------------------------------------------
+# 4. Orchestrator routes reflective PERSONAL turns to the synthesis prompt
+# ---------------------------------------------------------------------------
+
+
+def test_reflective_turn_uses_synthesis_prompt(sample_config) -> None:
+    """PERSONAL + reflective question → answer_personal_reflect.md."""
+    ep = _result("c1", 0.9, "episodic", "The user works at KareOne.")
+    orch, llm, _ = _make_orch(sample_config, [ep], Intent.PERSONAL,
+                              reflection_mode="regex")
+    try:
+        orch.chat("what do you think about me?", user_id="default")
+    finally:
+        _teardown(orch)
+
+    prompt = _answer_prompt(llm)
+    assert "reflective impression" in prompt
+    assert "honestly admit the limit" not in prompt
+
+
+def test_strict_coerces_misclassified_factual(sample_config) -> None:
+    """Classifier returns FACTUAL but the question is unambiguously reflective
+    → strict regex coerces to PERSONAL → synthesis prompt. (regex mode, no LLM)"""
+    ep = _result("c1", 0.9, "episodic", "The user works at KareOne.")
+    orch, llm, _ = _make_orch(sample_config, [ep], Intent.FACTUAL,
+                              reflection_mode="regex")
+    try:
+        orch.chat("how would you describe me?", user_id="default")
+    finally:
+        _teardown(orch)
+
+    prompt = _answer_prompt(llm)
+    assert "reflective impression" in prompt
+
+
+def test_factual_with_describe_me_object_not_coerced(sample_config) -> None:
+    """ASYMMETRIC PRECISION: 'describe me a function' is FACTUAL and must NOT
+    be coerced — the strict tier rejects it, so no synthesis prompt."""
+    doc = _result("c1", 0.9, "document", "def quicksort(): ...")
+    orch, llm, _ = _make_orch(sample_config, [doc], Intent.FACTUAL,
+                              reflection_mode="regex")
+    try:
+        orch.chat("describe me a function that sorts a list", user_id="default")
+    finally:
+        _teardown(orch)
+
+    prompt = _answer_prompt(llm)
+    assert "reflective impression" not in prompt
+
+
+def test_reflection_off_is_noop(sample_config) -> None:
+    """mode='off' → no synthesis prompt, no reflective LLM call."""
+    ep = _result("c1", 0.9, "episodic", "The user works at KareOne.")
+    orch, llm, _ = _make_orch(sample_config, [ep], Intent.PERSONAL,
+                              reflection_mode="off")
+    try:
+        orch.chat("what do you think about me?", user_id="default")
+    finally:
+        _teardown(orch)
+
+    prompt = _answer_prompt(llm)
+    assert "reflective impression" not in prompt
+    assert llm.reflective_calls == 0
+
+
+def test_regex_mode_never_calls_llm_judge(sample_config) -> None:
+    """mode='regex' must never consult the ReflectiveClassifier."""
+    ep = _result("c1", 0.9, "episodic", "The user works at KareOne.")
+    orch, llm, _ = _make_orch(sample_config, [ep], Intent.PERSONAL,
+                              reflection_mode="regex")
+    try:
+        # A question the regex tiers MISS (no opinion cue token), so hybrid
+        # would fall to the LLM — but regex mode must not.
+        orch.chat("tell me your overall vibe and read on me as a human",
+                  user_id="default")
+    finally:
+        _teardown(orch)
+    assert llm.reflective_calls == 0
+
+
+def test_hybrid_uses_llm_when_regex_misses(sample_config) -> None:
+    """mode='hybrid': a reflective-but-unusual phrasing the regex misses is
+    rescued by the LLM yes/no judge → synthesis prompt."""
+    ep = _result("c1", 0.9, "episodic", "The user works at KareOne.")
+    # "what's your gut feeling on who I am" — has self-ref ('i', 'your') but
+    # no opinion-cue token in the recall regex, and not a strict phrase.
+    q = "what's your gut feeling on who I am as a person"
+    assert not is_reflective_query(q)  # regex genuinely misses
+    orch, llm, _ = _make_orch(sample_config, [ep], Intent.PERSONAL,
+                              reflection_mode="hybrid", reflective_reply="yes")
+    try:
+        orch.chat(q, user_id="default")
+    finally:
+        _teardown(orch)
+
+    prompt = _answer_prompt(llm)
+    assert llm.reflective_calls >= 1
+    assert "reflective impression" in prompt

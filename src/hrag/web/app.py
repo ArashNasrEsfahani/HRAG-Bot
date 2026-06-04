@@ -37,7 +37,7 @@ from typing import Any, Callable, Literal, Optional
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
 logger = logging.getLogger("hrag.web")
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -108,6 +108,7 @@ class ConfigPatch(BaseModel):
     adaptive_personal_episodic_bias: Optional[bool] = None
     adaptive_top_k: Optional[dict] = None  # intent → int; unknown keys are dropped
     always_include_episodic: Optional[bool] = None
+    reflection_mode: Optional[str] = None  # off | regex | hybrid
     # Phase 7-A live-mutable knobs
     math_meta_filter_enabled: Optional[bool] = None
     math_meta_rerank_threshold: Optional[float] = None
@@ -237,6 +238,7 @@ def get_config() -> dict[str, Any]:
             "adaptive_top_k": cfg.retrieval.adaptive_top_k,
             "adaptive_retriever_per_intent": cfg.retrieval.adaptive_retriever_per_intent,
             "always_include_episodic": cfg.retrieval.always_include_episodic,
+            "reflection_mode": cfg.retrieval.reflection_mode,
             "math_meta_filter_enabled": cfg.retrieval.math_meta_filter_enabled,
             "math_meta_rerank_threshold": cfg.retrieval.math_meta_rerank_threshold,
         },
@@ -326,6 +328,17 @@ def patch_config(patch: ConfigPatch) -> dict[str, Any]:
         }
     if patch.always_include_episodic is not None:
         cfg.retrieval.always_include_episodic = patch.always_include_episodic
+
+    # Phase 11.1 — reflection mode. Read fresh each chat() turn, no rebuild.
+    if patch.reflection_mode is not None:
+        _valid_reflection_modes = {"off", "regex", "hybrid"}
+        if patch.reflection_mode not in _valid_reflection_modes:
+            raise HTTPException(
+                400,
+                f"Invalid reflection_mode {patch.reflection_mode!r}. "
+                f"Allowed: {sorted(_valid_reflection_modes)}",
+            )
+        cfg.retrieval.reflection_mode = patch.reflection_mode
 
     # Phase 7-A knobs — read at chat() time, no rebuild needed.
     if patch.math_meta_filter_enabled is not None:
@@ -1821,12 +1834,222 @@ def get_nougat_status() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Profile / preferences (Phase 12 GUI)
+# ---------------------------------------------------------------------------
+
+
+class ProfilePref(BaseModel):
+    polarity: str           # fact | style | like | dislike
+    topic: str
+    value: Optional[str] = ""
+    confidence: Optional[float] = 1.0
+
+
+@app.get("/api/profile")
+def get_profile() -> dict[str, Any]:
+    """List the user's structured preferences + the rendered profile string."""
+    orch = _get_orch()
+    cfg = _get_cfg()
+    uid = cfg.user.default_user_id
+    prefs = orch.profile_store.list_all(uid)
+    return {
+        "user_id": uid,
+        "rendered": orch.profile_store.render(uid),
+        "preferences": [
+            {
+                "pref_id": p.pref_id,
+                "polarity": p.polarity,
+                "topic": p.topic,
+                "value": p.value,
+                "confidence": p.confidence,
+                "last_updated": p.last_updated,
+            }
+            for p in prefs
+        ],
+    }
+
+
+@app.post("/api/profile")
+def upsert_profile(body: ProfilePref) -> dict[str, Any]:
+    """Insert or update one preference row."""
+    orch = _get_orch()
+    cfg = _get_cfg()
+    uid = cfg.user.default_user_id
+    if body.polarity not in ("fact", "style", "like", "dislike"):
+        raise HTTPException(400, "polarity must be fact|style|like|dislike")
+    if not (body.topic or "").strip():
+        raise HTTPException(400, "topic is required")
+    try:
+        pref_id = orch.profile_store.upsert(
+            uid, body.polarity, body.topic.strip(),
+            (body.value or "").strip(), float(body.confidence or 1.0),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"pref_id": pref_id}
+
+
+@app.delete("/api/profile/{pref_id}")
+def delete_profile(pref_id: int) -> dict[str, Any]:
+    orch = _get_orch()
+    cfg = _get_cfg()
+    ok = orch.profile_store.delete(cfg.user.default_user_id, int(pref_id))
+    return {"deleted": bool(ok)}
+
+
+# ---------------------------------------------------------------------------
+# Knowledge-graph viewer (Phase 12 GUI)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/kg/stats")
+def kg_stats() -> dict[str, Any]:
+    """Counts for the KG (nodes by type, edges, communities)."""
+    orch = _get_orch()
+    cfg = _get_cfg()
+    uid = cfg.user.default_user_id
+    db = orch.db
+
+    def _scalar(sql: str, params: tuple = ()) -> int:
+        try:
+            row = db.execute(sql, params).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except Exception:  # noqa: BLE001 — tables may be absent
+            return 0
+
+    return {
+        "enabled": bool(cfg.kg.enabled),
+        "phrase_nodes": _scalar(
+            "SELECT COUNT(*) FROM kg_nodes WHERE user_id=? AND node_type='phrase'", (uid,)),
+        "passage_nodes": _scalar(
+            "SELECT COUNT(*) FROM kg_nodes WHERE user_id=? AND node_type='passage'", (uid,)),
+        "edges": _scalar("SELECT COUNT(*) FROM kg_edges WHERE user_id=?", (uid,)),
+        "communities": _scalar("SELECT COUNT(*) FROM kg_communities WHERE user_id=?", (uid,)),
+    }
+
+
+@app.get("/api/kg/graph")
+def kg_graph(limit: int = 400, node_type: str = "phrase") -> dict[str, Any]:
+    """Return a capped slice of the KG for the D3 viewer.
+
+    Defaults to the highest-degree ``phrase`` nodes (the semantically useful
+    layer) and the edges among them, so the graph stays renderable on large
+    corpora. ``node_type='all'`` includes passage nodes too.
+    """
+    orch = _get_orch()
+    cfg = _get_cfg()
+    uid = cfg.user.default_user_id
+    db = orch.db
+    limit = max(10, min(int(limit), 2000))
+
+    type_clause = "" if node_type == "all" else "AND n.node_type = 'phrase'"
+    try:
+        # Rank nodes by degree (edge endpoints) so we show the hubs first.
+        rows = db.execute(
+            f"""
+            SELECT n.node_id, n.label, n.node_type,
+                   (SELECT COUNT(*) FROM kg_edges e
+                    WHERE e.user_id = n.user_id
+                      AND (e.src = n.node_id OR e.dst = n.node_id)) AS degree
+            FROM kg_nodes n
+            WHERE n.user_id = ? {type_clause}
+            ORDER BY degree DESC
+            LIMIT ?
+            """,
+            (uid, limit),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return {"nodes": [], "edges": [], "truncated": False}
+
+    keep = {r["node_id"] for r in rows}
+    nodes = [
+        {"id": r["node_id"], "label": r["label"], "type": r["node_type"],
+         "degree": int(r["degree"] or 0)}
+        for r in rows
+    ]
+    edges: list[dict[str, Any]] = []
+    if keep:
+        erows = db.execute(
+            "SELECT src, relation, dst, weight FROM kg_edges WHERE user_id = ?",
+            (uid,),
+        ).fetchall()
+        for e in erows:
+            if e["src"] in keep and e["dst"] in keep:
+                edges.append({
+                    "src": e["src"], "dst": e["dst"],
+                    "relation": e["relation"], "weight": float(e["weight"] or 1.0),
+                })
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "truncated": len(nodes) >= limit,
+    }
+
+
 @app.get("/api/feedback/stats")
 def get_feedback_stats() -> dict[str, Any]:
     """Return aggregate feedback statistics (thumbs-up/down totals + top negative)."""
     orch = _get_orch()
     from hrag.feedback_stats import feedback_summary  # noqa: PLC0415
     return feedback_summary(orch.db)
+
+
+@app.get("/api/feedback/export")
+def export_feedback(rating: str = "all") -> Response:
+    """Download rated turns as JSONL (training-pair shape).
+
+    ``rating`` is ``up`` | ``down`` | ``all``. Each line: user_message,
+    assistant_message, rating, note, session_id, created_at. Mirrors the
+    ``hrag feedback-export`` CLI so GUI exports match offline ones.
+    """
+    import json as _json  # noqa: PLC0415
+
+    orch = _get_orch()
+    db = orch.db
+    where = ""
+    params: tuple = ()
+    if rating in ("up", "down"):
+        where = "WHERE f.rating = ?"
+        params = (1 if rating == "up" else -1,)
+    rows = db.execute(
+        f"""
+        SELECT f.message_id, f.session_id, f.user_id, f.rating, f.note,
+               f.created_at, m.content AS assistant_message
+        FROM feedback f
+        JOIN messages m ON m.message_id = CAST(f.message_id AS INTEGER)
+        {where}
+        ORDER BY f.created_at ASC
+        """,
+        params,
+    ).fetchall()
+
+    lines: list[str] = []
+    for r in rows:
+        umsg = db.execute(
+            "SELECT content FROM messages WHERE session_id = ? AND role = 'user' "
+            "AND message_id < CAST(? AS INTEGER) ORDER BY message_id DESC LIMIT 1",
+            (r["session_id"], r["message_id"]),
+        ).fetchone()
+        record = {
+            "message_id": r["message_id"],
+            "user_message": umsg["content"] if umsg else "",
+            "assistant_message": r["assistant_message"],
+            "rating": r["rating"],
+            "note": r["note"],
+            "session_id": r["session_id"],
+            "created_at": r["created_at"],
+        }
+        lines.append(_json.dumps(record, ensure_ascii=False))
+    body = "\n".join(lines) + ("\n" if lines else "")
+    fname = f"hrag_feedback_{rating}.jsonl"
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1895,6 +2118,7 @@ def _node_to_dict(node: Any, *, with_centroid: bool = False) -> dict[str, Any]:
         "depth": int(node.depth),
         "is_leaf": bool(node.is_leaf),
         "doc_count": int(node.doc_count),
+        "keywords": list(getattr(node, "keywords", []) or []),
         "created_at": node.created_at,
         "updated_at": node.updated_at,
     }
@@ -1972,6 +2196,7 @@ def _build_tree_dict(store, user_id: str) -> dict[str, Any]:
             "depth": int(n.depth),
             "is_leaf": bool(n.is_leaf),
             "doc_count": count,
+            "keywords": list(getattr(n, "keywords", []) or []),
             "parent_id": n.parent_id,
             "children": children,
         }
@@ -2081,13 +2306,19 @@ class TaxonomyNodeCreate(BaseModel):
     label: str
     description: Optional[str] = ""
     parent_id: Optional[str] = None
-    is_leaf: Optional[bool] = False
+    # Newly created nodes have no children and no docs yet — they ARE leaves
+    # by definition. Defaulting False stored bogus is_leaf=0 rows that hid
+    # user-created nodes from the "Move to leaf" picker and rejected DnD
+    # drops. The parent's is_leaf is flipped to 0 inside add_node() when this
+    # child is inserted.
+    is_leaf: Optional[bool] = True
 
 
 class TaxonomyNodePatch(BaseModel):
     label: Optional[str] = None
     description: Optional[str] = None
     parent_id: Optional[str] = None
+    keywords: Optional[list[str]] = None  # Phase 12: edit hybrid-routing keywords
 
 
 class TaxonomyMoveDoc(BaseModel):
@@ -2097,6 +2328,7 @@ class TaxonomyMoveDoc(BaseModel):
 
 class TaxonomyRecomputeBody(BaseModel):
     user_id: Optional[str] = None
+    force: Optional[bool] = False  # Phase 12: regenerate keywords even if present
 
 
 @app.post("/api/taxonomy/nodes")
@@ -2145,6 +2377,10 @@ def taxonomy_update_node(node_id: str, body: TaxonomyNodePatch) -> dict[str, Any
             store.update_node(node_id, label=body.label, description=body.description)
         if body.parent_id is not None and body.parent_id != existing.parent_id:
             store.move_node(node_id, body.parent_id)
+        if body.keywords is not None:
+            # Phase 12 — clean + persist edited keywords (any node, incl. root).
+            cleaned = [str(k).strip() for k in body.keywords if str(k).strip()]
+            store.set_node_keywords(existing.user_id, node_id, cleaned)
     except ValueError as exc:
         # cycle / unknown parent / cross-user → 400
         raise HTTPException(400, str(exc)) from exc
@@ -2443,6 +2679,74 @@ def taxonomy_recompute(body: TaxonomyRecomputeBody | None = None) -> StreamingRe
         raise RuntimeError(
             "TaxonomyBuilder has neither .build nor .build_for_user"
         )
+
+    return _stream_builder_progress(_run)
+
+
+@app.post("/api/taxonomy/keywords")
+def taxonomy_keywords(body: TaxonomyRecomputeBody | None = None) -> StreamingResponse:
+    """Backfill per-node keywords (hybrid routing) with streaming progress.
+
+    Generates keywords locally (no LLM) from each node's label, description,
+    and member doc summaries. ``force`` regenerates even where keywords exist.
+    """
+    store = _require_taxonomy_store()
+    cfg = _get_cfg()
+    uid = (body.user_id if body and body.user_id else cfg.user.default_user_id)
+    force = bool(getattr(body, "force", False)) if body else False
+    orch = _get_orch()
+    print(f"[taxonomy] keyword backfill start (user={uid}, force={force})", flush=True)
+
+    def _run(progress_cb: Callable[[str, dict], None]) -> None:
+        from hrag.taxonomy.keywords import extract_keywords  # noqa: PLC0415
+
+        nodes = store.list_nodes(uid)
+        targets = [n for n in nodes if n.parent_id is not None]
+        children_of: dict[str, list] = {}
+        for n in nodes:
+            if n.parent_id is not None:
+                children_of.setdefault(n.parent_id, []).append(n)
+        top_k = int(getattr(cfg.taxonomy, "keywords_per_node", 8) or 8)
+        total = len(targets)
+        progress_cb("start", {"n_nodes": total})
+
+        def _leaf_summaries(node_id: str) -> list[str]:
+            doc_ids = store.get_docs_at(node_id)
+            if not doc_ids:
+                return []
+            ph = ",".join("?" * len(doc_ids))
+            rows = orch.db.execute(
+                f"SELECT m.summary AS summary, d.title AS title FROM documents d "
+                f"LEFT JOIN kg_taxonomy_doc_meta m "
+                f"  ON m.doc_id = d.doc_id AND m.user_id = d.user_id "
+                f"WHERE d.doc_id IN ({ph})",
+                doc_ids,
+            ).fetchall()
+            return [(r["summary"] or r["title"] or "") for r in rows if (r["summary"] or r["title"])]
+
+        updated = 0
+        for i, node in enumerate(targets, start=1):
+            if node.keywords and not force:
+                progress_cb("node_keywords", {"i": i, "n": total, "label": node.label,
+                                              "keywords": node.keywords, "skipped": True})
+                continue
+            texts = [node.label]
+            if node.description:
+                texts.append(node.description)
+            if node.is_leaf:
+                texts.extend(_leaf_summaries(node.node_id))
+            else:
+                for ch in children_of.get(node.node_id, []):
+                    texts.append(ch.label)
+                    if ch.keywords:
+                        texts.append(" ".join(ch.keywords))
+            kws = extract_keywords(texts, top_k=top_k)
+            if kws:
+                store.set_node_keywords(uid, node.node_id, kws)
+                updated += 1
+            progress_cb("node_keywords", {"i": i, "n": total, "label": node.label,
+                                          "keywords": kws, "skipped": False})
+        progress_cb("done", {"updated": updated, "total": total})
 
     return _stream_builder_progress(_run)
 

@@ -46,6 +46,9 @@ data/
 # --- Logs and scratch ---
 *.log
 _tree_preview*.html
+_probe*.png
+runs/
+tests/manual/*.png
 
 # --- Node (web tooling, if added later) ---
 node_modules/

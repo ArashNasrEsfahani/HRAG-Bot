@@ -33,6 +33,11 @@ class PreflightDecision:
     intent: Literal["factual", "personal", "greeting", "unclear"]
     gate: Literal["RETRIEVE", "SKIP"]
     clue: str
+    # Phase 11.1 — True when the personal question asks for an impression/
+    # opinion of the user. None when the model omitted the field (older
+    # prompt / malformed output), so callers can distinguish "not reflective"
+    # from "unknown" and fall back to the standalone reflective check.
+    reflective: Optional[bool] = None
 
 
 def _format_history(history: list["Message"]) -> str:
@@ -112,4 +117,15 @@ class CombinedPreflight:
             return None
         if gate not in _VALID_GATES:
             return None
-        return PreflightDecision(intent=intent, gate=gate, clue=clue)  # type: ignore[arg-type]
+        # Phase 11.1 — tolerate a missing/odd `reflective` field. Coerce common
+        # truthy spellings ("true"/true/"yes"); leave None when absent.
+        reflective: Optional[bool] = None
+        if "reflective" in data:
+            rv = data.get("reflective")
+            if isinstance(rv, bool):
+                reflective = rv
+            else:
+                reflective = str(rv).strip().lower() in {"true", "yes", "1"}
+        return PreflightDecision(  # type: ignore[arg-type]
+            intent=intent, gate=gate, clue=clue, reflective=reflective,
+        )

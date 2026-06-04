@@ -63,6 +63,15 @@ class PromptRegistry:
         self._personal_known_template: str = (
             prompts_dir / "answer_personal_known.md"
         ).read_text(encoding="utf-8")
+        # Phase 11: reflective-impression template — fires when the PERSONAL
+        # question is an opinion/reflection request ("what do you think about
+        # me", "describe me"). Unlike answer_personal_known.md, this asks the
+        # LLM to SYNTHESISE a warm impression from profile + memories +
+        # documents instead of reciting one saved fact and offering to search.
+        # Loaded eagerly so a missing file surfaces at boot.
+        self._personal_reflect_template: str = (
+            prompts_dir / "answer_personal_reflect.md"
+        ).read_text(encoding="utf-8")
 
     def get(self, intent: Intent) -> str:
         """Return the raw (un-rendered) template string for *intent*."""
@@ -115,6 +124,30 @@ class PromptRegistry:
         return self._personal_known_template.format(
             retrieved_memories=retrieved_memories,
             retrieved_docs_summary=retrieved_docs_summary,
+            conversation_history=conversation_history,
+            question=question,
+        )
+
+    def render_personal_reflect(
+        self,
+        *,
+        user_profile: str,
+        retrieved_memories: str,
+        retrieved_docs: str,
+        conversation_history: str,
+        question: str,
+    ) -> str:
+        """Render the Phase 11 reflective-impression PERSONAL template.
+
+        Fires when the orchestrator classifies the PERSONAL question as a
+        reflection/opinion request ("what do you think about me", "describe
+        me"). Synthesises profile + memories + document material into a warm
+        impression instead of reciting one fact and offering to search.
+        """
+        return self._personal_reflect_template.format(
+            user_profile=user_profile,
+            retrieved_memories=retrieved_memories,
+            retrieved_docs=retrieved_docs,
             conversation_history=conversation_history,
             question=question,
         )

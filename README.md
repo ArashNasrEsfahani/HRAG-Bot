@@ -2,24 +2,33 @@
 
 A personal RAG chatbot for 10–1000 documents with **hierarchical reasoning**, **growing per-user memory**, and a **modular** architecture you can incrementally extend. Built around a synthesis of recent RAG papers (HippoRAG2, GraphRAG, HeteRAG, RAFT, RAGate, MemoRAG, KG2RAG, ACP-RAG, and others).
 
-> **Status**: Phases 1–3 complete (vector RAG · KG hierarchy · personalization with memory + taxonomy). 537 unit tests passing. Phases 4–5 (compaction & gating · polish) on the roadmap below.
+> **Status**: Phases 1–13 complete — vector RAG · KG hierarchy · personalization (memory + taxonomy) · compaction & gating · web GUI · real pluggable backends · math-aware retrieval · interactive review loop · speed/observability wins · modular embedding backends · reflective personal answers · bilingual GUI + keyword taxonomy · **agentic deep-read**. ~1100 unit tests passing. See `CLAUDE.md` for the full phase-by-phase log and load-bearing contracts.
 
-## What's working today (Phases 1–3)
+## What's working today (Phases 1–13)
 
-- Ingest **PDFs, DOCX, Markdown, plain text** documents with structure-aware chunking (HeteRAG metadata fusion).
-- Pluggable retriever: **vector / BM25 / hybrid (RRF) / kg_ppr / community / router / taxonomy** (default).
-- Pluggable reranker: **cross-encoder (default) / LLM 0-3 / batched LLM** — or none.
+**Core RAG (P1–2)**
+- Ingest **PDFs, DOCX, Markdown, plain text** with structure-aware chunking (HeteRAG metadata fusion) + a chunk quality filter.
+- Pluggable retriever: **vector / BM25 / hybrid (RRF) / kg_ppr / community / router / taxonomy** (default); pluggable reranker: **cross-encoder (default) / LLM 0-3 / batched LLM** — or none.
 - RAFT-style answer generation with `##begin_quote##` evidence citations.
-- **Knowledge graph layer** (Phase 2): OpenIE triple extraction, Personalized PageRank retrieval, GraphRAG-style Leiden community summaries, LLM-routed dispatch, KG2RAG MST organizer.
-- **Personalization layer** (Phase 3):
-  - **Per-user memory** — `/remember`, `/recall`, `/forget`; structured preferences rendered into every answer prompt.
-  - **Hierarchical document taxonomy** — LLM proposes a category tree over your docs and memories, you edit it in the GUI, retrieval beam-searches the tree and only opens chunks from a few picked leaves. See [Hierarchical taxonomy](#hierarchical-taxonomy-phase-3) below.
-- Pluggable **Ollama / OpenAI / Anthropic** LLM backends behind one interface.
-- Pluggable **sentence-transformers / OpenAI** embedding backends.
+- **Knowledge graph layer**: OpenIE triple extraction, Personalized PageRank retrieval, GraphRAG-style Leiden community summaries, LLM-routed dispatch, KG2RAG MST organizer.
+
+**Personalization (P3, P11)**
+- **Per-user memory** — `/remember`, `/recall`, `/forget`; structured preferences rendered into every answer prompt.
+- **Hierarchical document taxonomy** — LLM proposes a category tree over your docs and memories, you edit it in the GUI, retrieval beam-searches the tree and opens chunks from a few picked leaves (P12 adds hybrid keyword routing). See [Hierarchical taxonomy](#hierarchical-taxonomy-phase-3) below.
+- **Reflective personal answers** — "what do you think about me?" forms a grounded impression from your profile + memories (never recasting document content as your biography), behind `retrieval.reflection_mode` (`off`|`regex`|`hybrid`).
+
+**Compaction, gating & accuracy (P4, P9)** — RAGate skip-gating, clue-generation, dialog-MST compaction, `[UNCERTAIN]` masking, combined preflight, CRAG reroute, Self-RAG, **Anthropic Contextual Retrieval** at ingest — all behind `compaction.*` / `retrieval.*` flags.
+
+**Extensibility & backends (P5–7, P10)** — real **sqlite-vec** and **Neo4j** backends behind the Vector/KG protocols; adaptive top-k & retriever per intent; math-aware retrieval (Unicode + LaTeX); modular embedding backends (ONNX / fp16 / OpenVINO / `model2vec`, `bge-small`) flippable from `config.yaml`.
+
+**Agentic deep-read (P13)** — broad questions ("tell me about X") trigger an iterative, section-by-section read of the best-matching document, visualised live as a **document-map panel** (sections open `○→✓`), ending with follow-up suggestions. See [Deep read](#deep-read-phase-13) below.
+
+**Interfaces**
+- Pluggable **Ollama / OpenAI / Anthropic** LLM backends and **sentence-transformers / OpenAI / model2vec** embedding backends behind one interface each.
 - Multi-user-ready SQLite schema (single user is the default).
-- Interactive CLI with **live progress display** and a `/status` command to see session state.
-- **Web GUI** (`hrag web`) — FastAPI + SSE SPA modelled on claude.ai / ChatGPT: streaming chat, sources, sessions, memories, document upload, feedback.
-- 537 unit tests passing.
+- Interactive CLI with **live progress display** and slash commands.
+- **Web GUI** (`hrag web`) — FastAPI + SSE SPA modelled on claude.ai / ChatGPT: streaming chat (clean answer + collapsible reasoning), sources, sessions, memories, document upload, feedback, an editable taxonomy/keyword view, a profile drawer, a D3 knowledge-graph view, KaTeX math, and Persian/RTL typography. An optional **interactive review loop** (`interaction.review_enabled`) pauses between retrieval and answer for human steering.
+- ~1100 unit tests passing (heavy-dep tests skip cleanly).
 
 ## Quick start
 
@@ -202,6 +211,28 @@ hrag taxonomy show               # print the tree as a text outline
 hrag taxonomy clear              # drop the tree (preserves doc-meta cache)
 ```
 
+## Deep read (Phase 13)
+
+Ask a broad, exploratory question — *"tell me about the Red Book"*, *"give me an overview of HippoRAG"*, *"walk me through this paper"* — and HRAG switches from a single retrieve→answer pass to an **iterative deep read** of the single most relevant document:
+
+1. **Pick the document** from a seed retrieval, and lay it out as a bounded **document map** of ordered parts.
+2. **Read in passes** — each pass pulls a few fresh (unseen) chunks, drafts a short note on what they add, and decides what to look for next from what it just learned.
+3. **Visualise it live** — the web GUI shows a *Reading: &lt;doc&gt;* panel whose parts open (`○ → ✓`, with quote counts) as they're read, the running synthesis building below, the final answer streaming in.
+4. **Know when to stop** — on a plateau (no new sections), the model's own signal (after `min_passes`), or a hard pass cap — then propose follow-up questions.
+
+It's on by default and **auto-triggers** on broad phrasings (precise questions still use the fast single pass). Tune it under `deep_read:` in `config.yaml`:
+
+```yaml
+deep_read:
+  enabled: true
+  auto_trigger: true     # fire automatically on broad/exploratory questions
+  max_passes: 4          # hard cap on read→plan iterations
+  min_passes: 2          # always iterate at least this many while the doc has more
+  chunks_per_pass: 6
+```
+
+> Part labels are only as good as the document's ingested `section` metadata; messy PDFs yield bounded-but-noisy labels (falling back to "Part N"). A stronger planning model reads deeper before stopping.
+
 ## Tuning retrieval quality
 
 If retrieval feels off (single bad source, "I couldn't find that", reranker drops everything), check these:
@@ -269,7 +300,9 @@ Every layer has a single small Python module. To swap a layer (e.g. trade Chroma
 ```
 src/hrag/
 ├── cli.py                       # click-based CLI (incl. hrag taxonomy / hrag remember / hrag web)
-├── orchestrator.py              # main pipeline
+├── orchestrator.py              # main pipeline (incl. reflective + deep-read paths)
+├── deepread.py                  # phase 13 — agentic deep read (pure helpers + state)
+├── intent.py                    # intent classifier + reflective detection (pure regex tiers)
 ├── config.py                    # pydantic config + env overrides
 ├── types.py                     # Document, Chunk, RetrievalResult, ...
 ├── providers/
@@ -299,7 +332,12 @@ src/hrag/
 ├── memory/                      # phase 3 — per-user memory
 │   ├── profile.py · store.py · extractor.py · auto_extract.py
 ├── context/
-│   └── builder.py               # renders {user_profile} into the answer prompt
+│   ├── builder.py               # renders {user_profile} into the answer prompt
+│   └── dialog_mst.py            # phase 4 — dialog compaction
+├── gating/                      # phase 4 — RAGate, clue-gen, [UNCERTAIN] masking
+│   ├── gate.py · clue.py · uncertain.py · combined.py
+├── interaction/                 # phase 8 — human-in-the-loop review loop
+│   ├── store.py · review.py
 ├── taxonomy/                    # phase 3 — hierarchical taxonomy
 │   ├── types.py                 # TaxonomyNode, NodeScore, LevelTrace, DescendResult
 │   ├── store.py                 # TaxonomyStore (CRUD + centroids + beam descend)
@@ -308,18 +346,15 @@ src/hrag/
 ├── web/                         # FastAPI SPA (chat + admin)
 │   ├── app.py                   # routes + SSE
 │   └── static/                  # index.html · app.js · styles.css
-├── prompts/                     # all prompt templates as .md
+├── prompts/                     # all prompt templates as .md (edit these, not Python strings)
 │   ├── answer.md                # RAFT-style CoT with ##begin_quote## ... ##end_quote##
-│   ├── rerank.md
-│   ├── triple_extraction.md     # phase 2
-│   ├── community_summary.md     # phase 2
-│   ├── router.md                # phase 2
-│   ├── preference_extract.md    # phase 3 (memory)
-│   ├── taxonomy_doc_summary.md  # phase 3 (taxonomy)
-│   ├── taxonomy_propose.md      # phase 3 (taxonomy)
-│   ├── taxonomy_relabel.md      # phase 3 (taxonomy)
-│   ├── taxonomy_route_tiebreak.md  # phase 3 (taxonomy)
-│   ├── gate.md · clue.md        # phase 4 (placeholders)
+│   ├── answer_personal_reflect.md · reflective_check.md        # phase 11 (reflective)
+│   ├── deep_read_pass.md · deep_read_synthesize.md             # phase 13 (deep read)
+│   ├── combined_preflight.md · gate.md · clue.md               # phase 4/9 (gating + preflight)
+│   ├── contextual_chunk.md · extract_formulas.md               # phase 9.14 / phase 7 (ingest + math)
+│   ├── rephrase.md · clarify.md · followups.md · why_source.md # phase 8 (review loop)
+│   ├── taxonomy_{propose,doc_summary,relabel,route_tiebreak}.md   # phase 3/12 (taxonomy)
+│   └── triple_extraction.md · community_summary.md · router.md # phase 2 (KG)
 └── db/
     ├── schema.sql               # incl. kg_taxonomy_nodes / kg_taxonomy_assignments / kg_taxonomy_doc_meta
     ├── migrations.py
@@ -333,8 +368,15 @@ src/hrag/
 | 1 | Walking skeleton: ingest + vector retrieve + rerank + answer | ✅ Done | HeteRAG, RAFT, ACP-RAG, Vladika & Matthes |
 | 2 | Hierarchical retrieval: KG + Personalized PageRank + Leiden community summaries + query router + KG2RAG MST | ✅ Done | HippoRAG2, GraphRAG, KG2RAG, GFM-RAG |
 | 3 | **Personalization**: per-user memory (`/remember` + profile + episodic store) **and** hierarchical document taxonomy (LLM-proposed + user-editable tree, beam-search retrieval over docs + memories) | ✅ Done | SimRAG, ReMindRAG; tree retrieval is novel here |
-| 4 | Compaction & gating: RAGate + clue-generation + dialog MST filter + `[UNCERTAIN]` masking | Next | RAGate, MemoRAG, KG2RAG, CoopRAG |
-| 5 | Polish: streaming refinements, fine-tuning hooks, optional Neo4j / sqlite-vec backends, locked equation-aware ingest | | DynamicRAG, RAFT (FT), DRAE (DPMM) |
+| 4 | Compaction & gating: RAGate + clue-generation + dialog MST filter + `[UNCERTAIN]` masking | ✅ Done | RAGate, MemoRAG, KG2RAG, CoopRAG |
+| 5 | Web ergonomics + extensibility: memory CRUD, background ingest jobs, pluggable Vector/KG backends, feedback loop, equation-aware ingest | ✅ Done | — |
+| 6–7 | Real sqlite-vec / Neo4j backends, adaptive top-k & retriever per intent, Ollama warmth, math-aware retrieval (Unicode + LaTeX) | ✅ Done | — |
+| 8 | Interactive retrieval review loop (human-in-the-loop pause + rephrase/filter/expand) | ✅ Done | — |
+| 9 | Speed, observability & accuracy: async/combined preflight, query cache, prompt caching, quantized rerank, CRAG, Self-RAG, **Contextual Retrieval** | ✅ Done | Anthropic Contextual Retrieval, CRAG, Self-RAG |
+| 10 | Modular embedding backends: ONNX / fp16 / OpenVINO / model2vec, `bge-small`, dim-mismatch guard | ✅ Done | model2vec |
+| 11 | Reflective / opinion personal answers (grounded impression, switchable detection) | ✅ Done | — |
+| 12 | Bilingual visual GUI (KaTeX, Persian/RTL) + hybrid keyword-routing taxonomy | ✅ Done | YAKE |
+| 13 | **Agentic deep-read**: iterative section-by-section read with a live document-map | ✅ Done | IRCoT / FLARE-style iterative retrieval |
 
 
 ## Running the tests

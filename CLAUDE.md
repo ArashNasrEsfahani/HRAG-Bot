@@ -23,7 +23,7 @@ For any request that decomposes into 2+ work items, dispatch to subagents. Pick 
 
 Fan out in waves: agents on disjoint files run in parallel (single message, multiple `Agent` calls); serialize only when later work depends on an earlier deliverable. After each wave the main thread verifies — `pytest`, ruff, schema sanity. Don't shard smaller than ~one file per agent. Trivial single edits: just do it inline.
 
-## Project status (phases 1–12 complete; ~1051+ tests)
+## Project status (phases 1–13 complete; ~1100 tests)
 
 Every phase's feature sits behind a config flag (defaults noted). Default retriever is `taxonomy` (falls back to `vector` when the tree is empty). Heavy-dep tests skip cleanly via `tests/conftest.py` stubs.
 
@@ -70,7 +70,11 @@ Every phase's feature sits behind a config flag (defaults noted). Default retrie
 - GUI (`web/static/*`): KaTeX math on completed messages only; `:lang(fa)` Persian typography (Vazirmatn, RTL); per-message actions (copy-md/regenerate/edit-resend); `decorateBubble()` (callouts, code chips, `.table-wrap`, `linkCitations`); `renderDescend` with matched-keyword chips. Surfaces: taxonomy keyword editor (`PUT /api/taxonomy/nodes/{id}`, `POST /api/taxonomy/keywords`), Profile drawer (`/api/profile`, `POST /api/memories/extract`), Graph page (D3, `GET /api/kg/graph|stats`), feedback export.
 - Taxonomy hybrid routing: per-node `keywords` (additive JSON TEXT col). Gen = LLM-in-propose (`taxonomy_propose.md`) + local backfill (`taxonomy/keywords.py`, pure stdlib YAKE-style, EN/FA + ZWNJ). `beam_descend` blends `cosine + keyword_weight*overlap` (no-op until keyworded); `DocAssigner._keyword_tiebreak`. In-memory node cache (TTL 30s, invalidated on `_commit`). `TaxonomyConfig`: `keyword_routing_enabled`(ON), `keyword_weight=0.2`, `keywords_per_node=8`, `keyword_tiebreak_skip`, `cache_tree_in_memory`. CLI `hrag taxonomy keywords [--force]`.
 
-**Deferred (not blockers):** running Nougat over a real corpus; feedback-loop fine-tuning training infra; cross-turn KV-cache reuse via Ollama prefix tokens beyond `num_keep`.
+**P13** (`deep_read.*`; `enabled` + `auto_trigger` default ON) — **agentic iterative deep read**. A broad/exploratory question (`deepread.is_broad_query`, pure) auto-routes to `Orchestrator._run_deep_read` instead of the one-pass path: pick the best document from seed retrieval (`pick_target_doc`), model it as ≤10 ordered **parts** (`build_parts` segments by `chunk_index` — real docs carry hundreds of noisy `section`s), then loop read→plan passes (each drafts a note + chooses the next sub-query from what it just learned, excluding already-seen chunks). Stops on the model's `done`/empty-query (only after `min_passes`), a plateau (no new chunks), or `max_passes`; then renders `deep_read_synthesize.md` (streamed) + follow-up chips. Modules `deepread.py` (pure `is_broad_query`/`pick_target_doc`/`build_parts`/`DeepReadState`), prompts `deep_read_{pass,synthesize}.md`. Events `deep_read_start` (doc + part map), `section_opened` (parts check off, quote counts), `deep_read_pass` — relayed as first-class SSE; follow-ups reuse the `followups` event/chip UI; the answer streams via `generate_token`→`token`. Frontend: a "Reading: &lt;doc&gt;" document-map panel (parts `○→✓` + pulse) above the streamed answer. Stream-only; skipped under the Phase-8 review loop.
+
+**Answer UI + static caching** (web) — `app.js` `splitReasoningAnswer`/`cleanCotMarkers` show the clean RAFT `Answer:` in the bubble, CoT in a collapsed `<details>`, `##begin_quote##`→blockquotes (streaming/final/history; copy uses the clean answer). `/static/*` served `Cache-Control: no-cache` (`_RevalidateStaticFiles`) + `?v=` asset versions so JS/CSS updates aren't masked by stale caches.
+
+**Deferred (not blockers):** running Nougat over a real corpus; feedback-loop fine-tuning training infra; cross-turn KV-cache reuse via Ollama prefix tokens beyond `num_keep`; cleaner deep-read part labels (limited by noisy ingest-time `section` metadata); deeper multi-pass reads (small planning model stops early — tune `deep_read.min_passes`).
 
 ## Contracts — load-bearing invariants (must survive future phases)
 
@@ -149,13 +153,18 @@ Numbered globally; the phase tag shows when each was introduced.
 50. `reflection_mode == "off"` is a true no-op (no coercion, no synthesis prompt, `ReflectiveClassifier` not constructed). `"regex"` is pure-function only — never calls the LLM judge.
 51. `is_reflective_strict()`, `is_reflective_query()`, `has_self_reference()`, `has_reflective_anchor()` are pure. Only `is_reflective_strict()` (or the hybrid LLM signal) may COERCE non-PERSONAL→PERSONAL; the loose recall tier must NOT coerce (protects `"describe me a function"`). The hybrid LLM judge is consulted/honoured only when `has_reflective_anchor()` holds, so a lone false "yes" can't coerce a neutral message (protects `"Ok i want to test you"`).
 52. `PreflightDecision.reflective` is `Optional[bool]` — `None` (field omitted → fall back to the standalone judge) is distinct from `False`; `_extract_json` tolerates extra/missing keys.
-53. `reflective_check` fires whenever `reflection_mode != "off"` with `{mode,strict,loose,llm,reflective}`. The reflective render path consumes `chunk.text`, never the profile-augmented retrieval query (preserves contracts 1 / 35).
+53. `reflective_check` fires whenever `reflection_mode != "off"` with `{mode,strict,loose,llm,reflective}`. The reflective render path consumes `chunk.text`, never the profile-augmented retrieval query (preserves contracts 1 / 35). The reflect synthesis includes a document chunk ONLY when it references a distinctive user-profile term (`_chunk_is_about_user` / `_user_identifying_terms`); a thin/empty profile ⇒ zero documents reach the prompt, so a weak model can't recast document content (a novel's plot) as the user's biography.
 
 **P12 (54–57):**
 54. `kg_taxonomy_nodes.keywords` is additive JSON TEXT; `_row_to_node` tolerates a missing column / NULL / malformed JSON → `[]`; migration is guarded `ALTER TABLE ... ADD COLUMN`.
 55. `beam_descend` with `keyword_weight == 0` (or no `query_keywords`, or an unkeyworded tree) is byte-identical to pre-P12 dense-only descent. `keyword_routing_enabled` defaults ON but is inert until a tree is keyworded.
 56. `taxonomy/keywords.py` (`tokenize`, `extract_keywords`, `keyword_overlap`) is pure, bilingual (EN + ZWNJ-FA); `keyword_overlap` returns 0.0 when either side is empty.
 57. The node cache is invalidated on every node-mutating write (all commit through `TaxonomyStore._commit`) and self-expires after `cache_ttl_s`; `cache_tree_in_memory=false` sets TTL 0 (disabled). Cached reads == fresh reads.
+
+**P13 (58–60):**
+58. Deep-read auto-routes ONLY when `stream` AND `deep_read.enabled`/`auto_trigger` AND intent ∈ {FACTUAL, GENERAL} AND not reflective AND not `interaction.review_enabled` AND `is_broad_query`. `_run_deep_read` returning `None` (no document matched) MUST fall through to the normal one-pass path — never a dead end. The normal single-pass path stays byte-identical when `deep_read.enabled=False`.
+59. `is_broad_query`, `pick_target_doc`, `build_parts`, `DeepReadState` are pure (no LLM/IO). `build_parts` returns ≤ `n_parts` contiguous, non-overlapping, ascending parts even for a 600-section document; `pick_target_doc` ignores episodic chunks and returns `None` on no document results.
+60. Deep-read events `deep_read_start` / `section_opened` / `deep_read_pass` are relayed as DEDICATED SSE event types (not nested under `progress`); follow-ups reuse the `followups` event + chip UI; the final answer streams via `generate_token`→`token` exactly like the normal path.
 
 ## Manual triggers
 

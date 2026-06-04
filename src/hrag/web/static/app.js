@@ -82,7 +82,11 @@ function renderStreamingMd(els) {
     // progress even after innerHTML is replaced each tick. The trailing
     // <span class="md-cursor"></span> is stripped by the final-event
     // handler when it re-renders without it.
-    els.bubble.innerHTML = renderMD(raw, { withHighlight: false }) +
+    // During streaming, show the answer once it starts; before that, the
+    // (marker-cleaned) reasoning reads as a lightweight "thinking" view.
+    const { reasoning, answer } = splitReasoningAnswer(raw);
+    const shown = cleanCotMarkers(answer || reasoning || raw);
+    els.bubble.innerHTML = renderMD(shown, { withHighlight: false }) +
       '<span class="md-cursor" aria-hidden="true"></span>';
   } catch (e) {
     // Fallback: dump the raw text so the user never sees a blank bubble.
@@ -96,6 +100,62 @@ function escapeHTML(s) {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
+}
+
+// ---------- RAFT chain-of-thought presentation ----------
+// The answer prompt makes the model emit "Reasoning: … Answer: …" with
+// ##begin_quote##…##end_quote## evidence markers. The user should see a clean
+// final answer, not the raw scaffolding. Split it, collapse the reasoning, and
+// turn the quote markers into proper blockquotes.
+
+// Split a "Reasoning: … Answer: …" response. Returns {reasoning, answer};
+// reasoning is '' when there is no Answer: marker (e.g. greetings, personal
+// replies) — those render untouched.
+function splitReasoningAnswer(raw) {
+  const text = raw || '';
+  // The LAST line-anchored "Answer:" wins (the word may appear earlier in prose).
+  const re = /(^|\n)[ \t>*_#-]*answer[ \t]*:[ \t]*\r?\n?/gi;
+  let m, hitStart = -1, hitEnd = -1;
+  while ((m = re.exec(text))) { hitStart = m.index + m[1].length; hitEnd = re.lastIndex; }
+  if (hitStart < 0) return { reasoning: '', answer: text };
+  const reasoning = text.slice(0, hitStart)
+    .replace(/(^|\n)[ \t>*_#-]*reasoning[ \t]*:[ \t]*\r?\n?/i, '$1')
+    .trim();
+  const answer = text.slice(hitEnd).trim();
+  return { reasoning, answer };
+}
+
+// Convert ##begin_quote## … ##end_quote## evidence into markdown blockquotes;
+// strip any stray / unterminated markers and de-indent so the quote never
+// renders as an overflowing code block.
+function cleanCotMarkers(text) {
+  return (text || '')
+    .replace(/[ \t]*##begin_quote##[ \t]*([\s\S]*?)[ \t]*##end_quote##/gi,
+      (_, q) => '\n\n> ' + q.trim().replace(/\s*\n\s*/g, ' ') + '\n\n')
+    // strip a leftover bare "##begin_quote##" line prefix (model omitted the end)
+    .replace(/^[ \t]*##begin_quote##[ \t]*/gim, '> ')
+    .replace(/[ \t]*##\s*(?:begin|end)_quote\s*##[ \t]*/gi, '')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+// Render an assistant bubble: clean Answer in the body, CoT (if any) tucked
+// into a collapsed disclosure above it. Returns the clean answer text.
+function renderAssistantBubble(bubble, raw, withHighlight) {
+  const { reasoning, answer } = splitReasoningAnswer(raw);
+  const ansHTML = renderMD(cleanCotMarkers(answer), { withHighlight });
+  if (reasoning) {
+    const reaHTML = renderMD(cleanCotMarkers(reasoning), { withHighlight });
+    bubble.innerHTML =
+      '<details class="cot"><summary class="cot-summary">Reasoning</summary>' +
+      `<div class="cot-body">${reaHTML}</div></details>` +
+      `<div class="answer-body">${ansHTML}</div>`;
+    bubble.classList.add('has-cot');
+  } else {
+    bubble.innerHTML = ansHTML;
+    bubble.classList.remove('has-cot');
+  }
+  bubble._answerText = answer || raw || '';
+  return bubble._answerText;
 }
 
 function attachCopyButtons(root) {
@@ -1302,9 +1362,9 @@ function appendMessage(role, content, messageId = null) {
     maybeRTL(bubble, content);
   } else {
     bubble._rawText = content;
-    bubble.innerHTML = renderMD(content, { withHighlight: true });
+    const ansText = renderAssistantBubble(bubble, content, true);
     decorateBubble(bubble);
-    maybeRTL(bubble, content);
+    maybeRTL(bubble, ansText);
     wrap.appendChild(head);
     wrap.appendChild(bubble);
     wrap.appendChild(buildFeedbackBar(messageId));
@@ -1380,7 +1440,8 @@ function buildFeedbackBar(messageId = null) {
   copyBtn.title = 'Copy as Markdown';
   copyBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   copyBtn.addEventListener('click', async () => {
-    const md = bar.closest('.msg')?.querySelector('.bubble')?._rawText || '';
+    const bub = bar.closest('.msg')?.querySelector('.bubble');
+    const md = bub?._answerText || bub?._rawText || '';
     try {
       await navigator.clipboard.writeText(md);
       flashToast('Copied as Markdown');
@@ -1856,9 +1917,9 @@ function handleSSE(chunk, els) {
       // (with syntax highlighting + copy buttons) in a single repaint.
       els.bubble.classList.remove('streaming-plain', 'cursor');
       els.bubble._textNode = null;
-      els.bubble.innerHTML = renderMD(els.bubble._rawText, { withHighlight: true });
+      const ansText = renderAssistantBubble(els.bubble, els.bubble._rawText, true);
       decorateBubble(els.bubble);
-      maybeRTL(els.bubble, els.bubble._rawText);
+      maybeRTL(els.bubble, ansText);
       setPhase(els, 'done', 'done');
       // Store the message_id on the wrap so the feedback bar can POST it.
       if (final.message_id != null) {

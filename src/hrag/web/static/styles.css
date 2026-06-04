@@ -3638,3 +3638,46 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
   padding: 0 4px; font-size: 16px;
 }
 .tax-manual-banner .tmb-close:hover { color: var(--ink-bright); }
+
+/* ---- RAFT chain-of-thought: collapsed reasoning + clean answer ---- */
+.bubble.has-cot .answer-body > :first-child { margin-top: 0; }
+.bubble .cot {
+  margin: 0 0 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.bubble .cot-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0.42rem 0.7rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  transition: color var(--t-fast) var(--ease);
+}
+.bubble .cot-summary::-webkit-details-marker { display: none; }
+.bubble .cot-summary::before {
+  content: '▸';
+  font-size: 0.72em;
+  color: var(--muted-2);
+  transition: transform var(--t-fast) var(--ease);
+}
+.bubble .cot[open] .cot-summary::before { transform: rotate(90deg); }
+.bubble .cot-summary:hover { color: var(--accent); }
+.bubble .cot-body {
+  padding: 0.1rem 0.85rem 0.55rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.92em;
+}
+.bubble .cot-body > :first-child { margin-top: 0.55rem; }
+.bubble .cot-body blockquote { font-style: normal; opacity: 0.92; }
+/* An evidence block must never overflow the bubble horizontally. */
+.bubble pre { max-width: 100%; overflow-x: auto; }

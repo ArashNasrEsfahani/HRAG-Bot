@@ -186,7 +186,12 @@ app = FastAPI(title="HRAG-Bot Web", docs_url=None, redoc_url=None)
 
 @app.get("/")
 def root() -> FileResponse:
-    return FileResponse(_STATIC_DIR / "index.html")
+    # no-store on the shell so a freshly-deployed index.html (with bumped asset
+    # versions) is always picked up — never a stale SPA shell.
+    return FileResponse(
+        _STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/favicon.ico")
@@ -197,7 +202,20 @@ def favicon() -> FileResponse:
     raise HTTPException(404)
 
 
-app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+class _RevalidateStaticFiles(StaticFiles):
+    """Serve /static/* with ``Cache-Control: no-cache`` so browsers always
+    revalidate (cheap 304 via ETag when unchanged, fresh 200 when a file
+    changed). Without this, browsers cache JS/CSS heuristically and serve a
+    stale SPA after every update — the root cause of repeated "hard-refresh"
+    instructions."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidateStaticFiles(directory=_STATIC_DIR), name="static")
 
 
 # ---------------------------------------------------------------------------

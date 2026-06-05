@@ -209,3 +209,47 @@ def test_pdf_loader_inserts_blank_line_between_pages(tmp_path: Path) -> None:
     # The two page contents should be separated by at least one blank line
     # (i.e. \n\n) so downstream paragraph splitting respects the boundary.
     assert "\n\n" in doc.text
+
+
+@pytest.mark.skipif(
+    pytest.importorskip("fitz", reason="pymupdf not installed") is None,
+    reason="pymupdf not installed",
+)
+def test_pdf_loader_emits_page_spans(tmp_path: Path) -> None:
+    """Phase 13.1: _load_pdf_pymupdf must emit page_spans with monotonic,
+    non-overlapping entries; page_for_offset(0, spans) must equal 1.
+    """
+    fitz = pytest.importorskip("fitz")
+    from hrag.ingest.metadata import page_for_offset
+
+    pdf_path = tmp_path / "spans_test.pdf"
+    pdf_doc = fitz.open()
+    p1 = pdf_doc.new_page()
+    p1.insert_text((72, 72), "Content on page one.")
+    p2 = pdf_doc.new_page()
+    p2.insert_text((72, 72), "Content on page two.")
+    pdf_doc.save(str(pdf_path))
+    pdf_doc.close()
+
+    doc = load_document(pdf_path, "user1")
+    spans = doc.metadata.get("page_spans")
+    assert spans is not None, "page_spans must be present in PDF metadata"
+    assert len(spans) == 2, f"Expected 2 spans for 2-page PDF, got {len(spans)}"
+
+    # Spans must be non-overlapping and monotonically increasing
+    for i, (start, end, pno) in enumerate(spans):
+        assert start < end, f"Span {i} has start >= end: {start} >= {end}"
+        if i > 0:
+            prev_end = spans[i - 1][1]
+            assert start >= prev_end, (
+                f"Span {i} start {start} overlaps previous span end {prev_end}"
+            )
+
+    # Page numbers must be 1, 2 in order
+    page_nos = [pno for _, _, pno in spans]
+    assert page_nos == [1, 2], f"Expected page numbers [1, 2], got {page_nos}"
+
+    # page_for_offset(0, spans) must return page 1
+    assert page_for_offset(0, spans) == 1, (
+        "page_for_offset(0, spans) must be 1 (first page)"
+    )

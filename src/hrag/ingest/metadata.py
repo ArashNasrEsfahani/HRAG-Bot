@@ -7,12 +7,16 @@ Heading patterns detected (in priority order):
   1. Markdown headings:  # Section   ## Subsection   ### deeper -> subsection
   2. Numbered headings:  "1. Intro"  "2.1 Methods"  "1.1.2 Detail"
   3. ALL-CAPS lines:     lines < 80 chars that are entirely uppercase letters/punct/spaces
+
+Page + chapter helpers (Phase 13.1):
+  page_for_offset(offset, page_spans) -> Optional[int]
+  normalize_heading(s, *, max_len=80)  -> str
 """
 
 from __future__ import annotations
 
 import re
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -307,3 +311,103 @@ def find_references_offset(text: str) -> int | None:
 
     # Fallback: long run of citation-shaped lines without any heading.
     return _find_citation_run_offset(text)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.1 — page + chapter helpers
+# ---------------------------------------------------------------------------
+
+def page_for_offset(
+    offset: int,
+    page_spans: "list[tuple[int, int, int]]",
+) -> "Optional[int]":
+    """Return the 1-based page number whose [start, end) span contains *offset*.
+
+    ``page_spans`` is a list of ``(start_off, end_off, page_no)`` half-open
+    ranges as produced by ``_load_pdf_pymupdf``.  Rules:
+
+    * If ``page_spans`` is empty → ``None``.
+    * If ``offset`` falls in the separator gap between two pages (i.e. after
+      the end of page N but before the start of page N+1) → page N (the
+      preceding page).
+    * If ``offset >= end_off`` of the last span → last page_no (past-end
+      clamp, handles body_text truncation at the tail).
+    """
+    if not page_spans:
+        return None
+
+    prev_pno: Optional[int] = None
+    for start, end, pno in page_spans:
+        if start <= offset < end:
+            return pno
+        if offset < start:
+            # offset is in the separator gap before this page — return previous
+            return prev_pno if prev_pno is not None else pno
+        prev_pno = pno
+
+    # offset >= end of last span → clamp to last page
+    return page_spans[-1][2]
+
+
+# Compiled patterns used by normalize_heading.
+_RE_LEADING_HASHES = re.compile(r"^#{1,6}\s*")
+_RE_LEADING_NUMBERING = re.compile(
+    r"^(?:[IVXLCDM]+\.|[A-Z]\.|(?:\d+\.)+\d*\.?)\s+"
+)
+_RE_TRAILING_PUNCT = re.compile(r"[.:\-–—,;]+\s*$")
+_RE_INTERNAL_WS = re.compile(r"\s+")
+_RE_DIGIT_ONLY = re.compile(r"^\d+$")
+
+
+def normalize_heading(s: str, *, max_len: int = 80) -> str:
+    """Return a cleaned chapter label, or '' when the heading is unusable.
+
+    Cleaning steps (applied in order):
+    1. Collapse internal whitespace.
+    2. Strip leading Markdown ``#``+ prefix.
+    3. Strip leading numeric/roman/letter outline prefixes like ``1.``,
+       ``2.1``, ``IV.``, ``B.``.
+    4. Strip trailing punctuation/colon.
+
+    Returns ``''`` when any of these conditions hold after cleaning:
+    * The result contains the unicode replacement char ``\\ufffd`` (mojibake).
+    * Length > *max_len*.
+    * No alphabetic character remains.
+    * The string is digit-only.
+
+    Note: ``deepread._clean_heading`` performs similar normalisation for
+    display purposes; both are kept in sync but not shared to avoid coupling
+    the deep-read module to ingest internals.
+    """
+    if not s:
+        return ""
+
+    # Step 1: collapse internal whitespace
+    cleaned = _RE_INTERNAL_WS.sub(" ", s).strip()
+
+    # Step 2: strip leading Markdown hashes
+    cleaned = _RE_LEADING_HASHES.sub("", cleaned).strip()
+
+    # Step 3: strip leading outline prefix (numbers, roman, letter)
+    cleaned = _RE_LEADING_NUMBERING.sub("", cleaned).strip()
+
+    # Step 4: strip trailing punctuation
+    cleaned = _RE_TRAILING_PUNCT.sub("", cleaned).strip()
+
+    # Reject: mojibake replacement char
+    if "�" in cleaned:
+        return ""
+
+    # Reject: too long
+    if len(cleaned) > max_len:
+        return ""
+
+    # Reject: no alphabetic character
+    if not any(c.isalpha() for c in cleaned):
+        return ""
+
+    # Reject: digit-only (already covered by the alpha check, but be explicit)
+    if _RE_DIGIT_ONLY.match(cleaned):
+        return ""
+
+    return cleaned

@@ -1994,17 +1994,93 @@ function handleSSE(chunk, els) {
 }
 
 // ---------- Phase 13: deep-read document-map panel ----------
+
+// i18n strings for the action narrator (English + Farsi).
+const _DR_I18N = {
+  en: { opening: 'Opening', searching: 'Searching for', writing: 'Writing answer' },
+  fa: { opening: 'باز کردن', searching: 'جستجو برای', writing: 'نوشتن پاسخ' },
+};
+
+/** Return "p.142–151" / "p.142" (or FA variant "ص.142") from {page_lo, page_hi}. */
+function _drPagesLabel(obj, lang) {
+  const lo = obj && obj.page_lo;
+  const hi = obj && obj.page_hi;
+  if (lo == null) return '';
+  const prefix = (lang === 'fa') ? 'ص.' : 'p.';
+  if (hi != null && hi !== lo) return prefix + lo + '–' + hi;
+  return prefix + lo;
+}
+
+/** Derive the lang of the deepread panel (fa or en). */
+function _drLang(dr) {
+  return (dr && dr.panel && dr.panel.lang) || 'en';
+}
+
+/** Map action string → {icon, text} for the narrator line. */
+function _drNarrate(action, arg, lang) {
+  const i18n = _DR_I18N[lang] || _DR_I18N.en;
+  if (action === 'read_part') {
+    const label = (arg && (arg.label || (arg.idx != null ? ('Chapter ' + (arg.idx + 1)) : ''))) || '…';
+    const pages = _drPagesLabel(arg, lang);
+    const pagesPart = pages ? ' (' + pages + ')' : '';
+    return { icon: '📖', text: i18n.opening + ' ' + label + pagesPart + '…' };
+  }
+  if (action === 'read_page') {
+    const pages = _drPagesLabel(arg, lang);
+    return { icon: '📖', text: i18n.opening + (pages ? ' ' + pages : '') + '…' };
+  }
+  if (action === 'search') {
+    const query = (arg && arg.query) ? '"' + arg.query + '"' : '…';
+    return { icon: '🔎', text: i18n.searching + ' ' + query + '…' };
+  }
+  if (action === 'answer') {
+    return { icon: '✍️', text: i18n.writing + '…' };
+  }
+  return null;
+}
+
+/** Return the short action word used in the status badge. */
+function _drActionWord(action) {
+  if (action === 'read_part' || action === 'read_page') return 'reading';
+  if (action === 'search') return 'searching';
+  if (action === 'answer') return 'writing';
+  return null;
+}
+
+/** Scroll the focused part <li> into view and pulse it with .dr-opening. */
+function _drFocusPart(dr, idx) {
+  if (!dr || idx == null) return;
+  // Clear previous opening highlight.
+  if (dr._focusedLi) {
+    dr._focusedLi.classList.remove('dr-opening');
+  }
+  const li = dr.rows.get(Number(idx));
+  if (!li) return;
+  dr._focusedLi = li;
+  li.classList.add('dr-opening');
+  li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
 function renderDeepReadStart(els, p) {
   if (!els || !els.wrap || !els.bubble) return;
   const parts = Array.isArray(p.parts) ? p.parts : [];
   const panel = document.createElement('div');
   panel.className = 'deepread';
-  const rows = parts.map(pt =>
-    `<li class="dr-part" data-idx="${pt.idx}">` +
+
+  // Detect Farsi for RTL typography.
+  const rtlHint = (p.doc_title || '') + ' ' + (p.question || '');
+  maybeRTL(panel, rtlHint);
+
+  const rows = parts.map(pt => {
+    const pageLabel = _drPagesLabel(pt, panel.lang);
+    return `<li class="dr-part" data-idx="${pt.idx}">` +
       `<span class="dr-mark">○</span>` +
       `<span class="dr-label">${escapeHTML(pt.label || ('Part ' + ((pt.idx || 0) + 1)))}</span>` +
+      `<span class="dr-page">${escapeHTML(pageLabel)}</span>` +
       `<span class="dr-q"></span>` +
-    `</li>`).join('');
+    `</li>`;
+  }).join('');
+
   panel.innerHTML =
     `<div class="dr-head">` +
       `<span class="dr-book">📖</span>` +
@@ -2012,13 +2088,16 @@ function renderDeepReadStart(els, p) {
       `<span class="dr-status">opening…</span>` +
     `</div>` +
     `<ul class="dr-parts">${rows}</ul>` +
+    `<div class="dr-action" hidden></div>` +
     `<div class="dr-notes" hidden></div>`;
   els.wrap.insertBefore(panel, els.bubble);
   els._dr = {
     panel,
     rows: new Map([...panel.querySelectorAll('.dr-part')].map(li => [Number(li.dataset.idx), li])),
     status: panel.querySelector('.dr-status'),
+    action: panel.querySelector('.dr-action'),
     notes: panel.querySelector('.dr-notes'),
+    _focusedLi: null,
   };
   setPhase(els, 'retrieve', 'deep reading…');
 }
@@ -2033,16 +2112,53 @@ function markSectionOpened(els, p) {
   if (mark) mark.textContent = '✓';
   const q = li.querySelector('.dr-q');
   if (q) q.textContent = p.quotes ? String(p.quotes) : '';
+  // Fill or update the page chip if now available.
+  const pageEl = li.querySelector('.dr-page');
+  if (pageEl) {
+    const lbl = _drPagesLabel(p, _drLang(dr));
+    if (lbl) pageEl.textContent = lbl;
+  }
   // re-trigger the pulse animation
   li.classList.remove('dr-pulse');
   void li.offsetWidth;
   li.classList.add('dr-pulse');
+  // Focus (scroll into view + highlight).
+  _drFocusPart(dr, p.idx);
 }
 
 function appendDeepReadPass(els, p) {
   const dr = els && els._dr;
   if (!dr) return;
-  if (dr.status) dr.status.textContent = `pass ${p.pass || ''}`;
+  const action = p.action;
+  const arg = (typeof p.arg === 'object' && p.arg) ? p.arg : {};
+  const lang = _drLang(dr);
+
+  // --- Status badge ---
+  if (dr.status) {
+    const word = _drActionWord(action);
+    dr.status.textContent = word ? word : `pass ${p.pass || ''}`;
+  }
+
+  // --- Action narrator (single-line, replace-in-place) ---
+  if (dr.action) {
+    const narrated = _drNarrate(action, arg, lang);
+    if (narrated) {
+      dr.action.hidden = false;
+      dr.action.innerHTML =
+        `<span class="dr-action-icon">${narrated.icon}</span>` +
+        `<span class="dr-action-text">${escapeHTML(narrated.text)}</span>`;
+      // For read_part: also focus the target part immediately.
+      if (action === 'read_part' && arg.idx != null) {
+        _drFocusPart(dr, arg.idx);
+      }
+      // For answer: advance phase.
+      if (action === 'answer') {
+        setPhase(els, 'write', 'writing…');
+      }
+    }
+  }
+
+  // --- Append-only note trail (existing behavior, kept intact) ---
   const note = (p.note || '').trim();
   if (note && dr.notes) {
     dr.notes.hidden = false;

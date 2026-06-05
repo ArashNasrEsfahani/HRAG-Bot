@@ -20,6 +20,11 @@ _MIGRATIONS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_chunks_user_source_excluded "
     "ON chunks(user_id, source_type, excluded)",
 
+    # NOTE: the Phase-13.1 idx_chunks_doc_page index is created LATER (after the
+    # ALTER TABLE that adds chunks.page) — it must not run here, or a pre-13.1
+    # DB without the `page` column raises "no such column" and aborts the whole
+    # migration before the column is ever added.
+
     # Phase 3: ProfileStore.upsert keys on (user_id, topic, polarity).
     # UNIQUE because the upsert uses INSERT ... ON CONFLICT(user_id, topic, polarity).
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_preferences_user_topic_polarity "
@@ -127,3 +132,24 @@ def run_migrations(db: "Database") -> None:
     except sqlite3.OperationalError:
         # Pre-Phase-3 schemas without kg_taxonomy_nodes — skip silently.
         pass
+
+    # Phase 13.1: add page + chapter columns to chunks (additive, idempotent).
+    # page INTEGER — 1-based source page, PDF only; NULL for all other formats.
+    # chapter TEXT — normalised, forward-filled heading label.
+    for col_ddl in (
+        "ALTER TABLE chunks ADD COLUMN page INTEGER",
+        "ALTER TABLE chunks ADD COLUMN chapter TEXT",
+    ):
+        try:
+            with db.conn:
+                db.conn.execute(col_ddl)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+    # Now that chunks.page is guaranteed to exist, create its lookup index.
+    # (Must come after the ALTER above — see the NOTE in _MIGRATIONS.)
+    with db.conn:
+        db.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_doc_page ON chunks(doc_id, page)"
+        )

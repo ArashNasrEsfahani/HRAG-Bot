@@ -44,6 +44,10 @@ class Chunk:
     chunk_index: int = 0
     token_count: int = 0
     source_type: str = "document"
+    page: Optional[int] = None
+    """1-based source page (PDF only); None for non-paginated formats.
+       Mirrored to SQLite ``chunks.page`` + Chroma metadata (``-1`` sentinel)
+       so the agentic reader can navigate by page range. Phase 13.1."""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

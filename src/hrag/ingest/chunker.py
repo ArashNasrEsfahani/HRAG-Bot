@@ -14,7 +14,12 @@ from typing import Any, Callable
 
 from hrag.config import ChunkingConfig
 from hrag.types import Chunk, Document
-from hrag.ingest.metadata import detect_sections, find_references_offset
+from hrag.ingest.metadata import (
+    detect_sections,
+    find_references_offset,
+    normalize_heading,
+    page_for_offset,
+)
 from hrag.ingest.math_detect import (
     find_display_math_spans,
     has_math,
@@ -171,6 +176,8 @@ def chunk_document(
     doc: Document,
     chunking_cfg: ChunkingConfig,
     tokenizer: Any = None,
+    *,
+    page_metadata: bool = False,
 ) -> list[Chunk]:
     """Split a Document into Chunks ready for embedding.
 
@@ -183,6 +190,12 @@ def chunk_document(
     tokenizer:
         Optional callable(str) -> int for token counting.
         If None, uses tiktoken cl100k_base.
+    page_metadata:
+        When True, resolve per-chunk page number (from ``doc.metadata["page_spans"]``
+        when present) and forward-fill chapter labels from section headings.
+        ``chunk.page`` is set and ``metadata`` gains ``"page"`` + ``"chapter"`` keys.
+        When False (default), behaviour is byte-identical to pre-Phase-13.1:
+        ``chunk.page`` stays None and ``metadata`` contains only ``"has_math"``.
     """
     if tokenizer is not None:
         count_fn: Callable[[str], int] = tokenizer
@@ -200,6 +213,14 @@ def chunk_document(
         ref_off = find_references_offset(body_text)
         if ref_off is not None and ref_off > 0:
             body_text = body_text[:ref_off]
+
+    # Phase 13.1: page_spans ride on doc.metadata; only present for PDFs.
+    page_spans: list[tuple[int, int, int]] | None = None
+    if page_metadata:
+        page_spans = (doc.metadata or {}).get("page_spans")
+
+    # Forward-fill state for chapter labels (page_metadata path only).
+    last_good_chapter: str = ""
 
     sections = detect_sections(body_text)
     chunks: list[Chunk] = []
@@ -221,6 +242,18 @@ def chunk_document(
             count_fn,
         )
 
+        # Per-section monotonic search cursor for offset resolution.
+        search_cursor = start_off
+
+        # Resolve chapter for this section (page_metadata path).
+        if page_metadata:
+            clean = normalize_heading(section_title)
+            chapter: str = clean or last_good_chapter
+            if clean:
+                last_good_chapter = clean
+        else:
+            chapter = ""  # unused in no-op path
+
         for raw_text in raw_chunks:
             if not raw_text.strip():
                 continue
@@ -238,6 +271,19 @@ def chunk_document(
             else:
                 embedding_text = raw_text
 
+            # Phase 13.1: resolve page from chunk's absolute offset in body_text.
+            if page_metadata:
+                abs_off = body_text.find(raw_text, search_cursor, end_off)
+                if abs_off == -1:
+                    abs_off = start_off
+                else:
+                    search_cursor = abs_off + 1
+                page = page_for_offset(abs_off, page_spans) if page_spans else None
+                chunk_meta = {"has_math": has_math(raw_text), "page": page, "chapter": chapter}
+            else:
+                page = None
+                chunk_meta = {"has_math": has_math(raw_text)}
+
             chunk = Chunk(
                 chunk_id=f"{doc.doc_id}:{chunk_index:04d}",
                 doc_id=doc.doc_id,
@@ -250,7 +296,8 @@ def chunk_document(
                 chunk_index=chunk_index,
                 token_count=token_count,
                 source_type=doc.source_type,
-                metadata={"has_math": has_math(raw_text)},
+                page=page,
+                metadata=chunk_meta,
             )
             chunks.append(chunk)
             chunk_index += 1
@@ -259,6 +306,14 @@ def chunk_document(
     if not chunks and body_text.strip():
         raw_text = body_text.strip()
         embedding_text = f"[{doc.title}]\n\n{raw_text}" if chunking_cfg.metadata_fusion else raw_text
+
+        if page_metadata:
+            fallback_page = page_for_offset(0, page_spans) if page_spans else None
+            fallback_meta = {"has_math": has_math(raw_text), "page": fallback_page, "chapter": ""}
+        else:
+            fallback_page = None
+            fallback_meta = {"has_math": has_math(raw_text)}
+
         chunks.append(
             Chunk(
                 chunk_id=f"{doc.doc_id}:0000",
@@ -272,7 +327,8 @@ def chunk_document(
                 chunk_index=0,
                 token_count=count_fn(raw_text),
                 source_type=doc.source_type,
-                metadata={"has_math": has_math(raw_text)},
+                page=fallback_page,
+                metadata=fallback_meta,
             )
         )
 

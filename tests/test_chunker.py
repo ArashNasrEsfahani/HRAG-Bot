@@ -188,3 +188,115 @@ def test_whitespace_only_sections_skipped() -> None:
     # All chunks must have non-empty text
     for c in chunks:
         assert c.text.strip(), f"Chunk with empty text: {c!r}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.1 — page + chapter metadata
+# ---------------------------------------------------------------------------
+
+def _make_doc_with_spans(text: str, title: str = "TestDoc") -> Document:
+    """Build a Document whose metadata contains hand-crafted page_spans."""
+    # Two pages: page 1 covers the first half, page 2 the second half.
+    # We build the spans based on the actual text content, mirroring what
+    # _load_pdf_pymupdf does at join time.
+    # For simplicity: page 1 = first 100 chars, page 2 = rest (or vice versa).
+    # The test will build text that straddles the boundary.
+    SEP = "\n\n"
+
+    # Split text into two "pages" at the first double-newline.
+    parts = text.split(SEP, 1)
+    if len(parts) == 2:
+        p1_text, p2_text = parts
+    else:
+        p1_text, p2_text = text, ""
+
+    page_spans: list[tuple[int, int, int]] = []
+    cursor = 0
+    for pno, pg_text in enumerate([p1_text, p2_text], start=1):
+        if not pg_text:
+            continue
+        start = cursor
+        cursor += len(pg_text)
+        page_spans.append((start, cursor, pno))
+        cursor += len(SEP)
+
+    return Document(
+        doc_id="doc_pg_test",
+        user_id="tester",
+        source_path="/fake/path.pdf",
+        title=title,
+        text=text,
+        source_type="document",
+        metadata={"format": "pdf", "page_spans": page_spans},
+    )
+
+
+def test_chunk_carries_page_and_chapter() -> None:
+    """With page_metadata=True and a hand-crafted page_spans, at least one chunk
+    should have a non-None page and a non-empty chapter in metadata.
+    The has_math key must also be present on every chunk.
+    """
+    # Two-page text with a clear heading and body on page 1.
+    text = "# Chapter One\n\nFirst page body text with several words.\n\nSecond paragraph on page one."
+    doc = _make_doc_with_spans(text)
+    cfg = _default_cfg(max_tokens=200, overlap_tokens=10)
+    chunks = chunk_document(doc, cfg, page_metadata=True)
+
+    assert chunks, "Expected at least one chunk"
+    # Every chunk must have has_math
+    for c in chunks:
+        assert "has_math" in c.metadata, f"Missing has_math on chunk {c.chunk_id}"
+
+    # At least one chunk must have a non-None page
+    pages = [c.page for c in chunks if c.page is not None]
+    assert pages, "Expected at least one chunk with a non-None page"
+
+    # At least one chunk must have a non-empty chapter
+    chapters = [c.metadata.get("chapter", "") for c in chunks if c.metadata.get("chapter")]
+    assert chapters, "Expected at least one chunk with a non-empty chapter"
+
+
+def test_chapter_forward_fill() -> None:
+    """Chunks under a junk heading after a real one should inherit the real chapter."""
+    # "CHAPTER ONE" is a valid clean heading; "12345" and "---" are junk.
+    text = (
+        "CHAPTER ONE\n\nContent under chapter one.\n\n"
+        "12345\n\nContent under junk heading should still be chapter one."
+    )
+    doc = _make_doc_with_spans(text)
+    cfg = _default_cfg(max_tokens=300, overlap_tokens=10)
+    chunks = chunk_document(doc, cfg, page_metadata=True)
+
+    assert chunks
+    # All chunks that have metadata should have chapter == "CHAPTER ONE" (forward-filled)
+    chapter_vals = {c.metadata.get("chapter", "") for c in chunks if c.metadata}
+    # Should contain "CHAPTER ONE"; may contain "" from before the heading
+    assert "CHAPTER ONE" in chapter_vals, (
+        f"Expected forward-filled chapter 'CHAPTER ONE', got: {chapter_vals}"
+    )
+
+
+def test_page_metadata_disabled_is_noop() -> None:
+    """page_metadata=False must be byte-identical to the old behaviour:
+    every chunk.page is None and metadata == {"has_math": <bool>} exactly.
+    """
+    text = "# Section\n\nSome content here.\n\nMore content below.\n"
+    # Include page_spans in doc metadata to confirm they are ignored.
+    doc = Document(
+        doc_id="noop_test",
+        user_id="tester",
+        source_path="/fake/path.pdf",
+        title="NoopTest",
+        text=text,
+        source_type="document",
+        metadata={"format": "pdf", "page_spans": [(0, len(text), 1)]},
+    )
+    cfg = _default_cfg(max_tokens=200, overlap_tokens=10)
+    chunks = chunk_document(doc, cfg, page_metadata=False)
+
+    assert chunks
+    for c in chunks:
+        assert c.page is None, f"page must be None in no-op path, got {c.page!r}"
+        assert set(c.metadata.keys()) == {"has_math"}, (
+            f"metadata must contain ONLY has_math in no-op path, got {c.metadata}"
+        )

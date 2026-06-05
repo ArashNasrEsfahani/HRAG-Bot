@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     token_count  INTEGER NOT NULL DEFAULT 0,
     source_type  TEXT NOT NULL DEFAULT 'document',
     excluded     INTEGER NOT NULL DEFAULT 0,        -- /forget tombstone
+    page         INTEGER,                           -- Phase 13.1: 1-based source page (PDF only; NULL otherwise)
+    chapter      TEXT,                              -- Phase 13.1: normalised, forward-filled heading label
     metadata     TEXT,
     FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
@@ -42,6 +44,10 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_user ON chunks(user_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_excluded ON chunks(excluded);
+-- idx_chunks_doc_page is created in migrations.py AFTER the page column is
+-- guaranteed to exist. It must NOT live here: init_schema() runs this file whole
+-- via executescript(), and an existing pre-13.1 chunks table has no `page`
+-- column, so indexing it here would abort the entire schema bootstrap.
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id  TEXT PRIMARY KEY,

@@ -79,7 +79,11 @@ from hrag.intent import (
 from hrag.deepread import (
     DeepReadState,
     build_parts,
+    distinct_chapter_labels,
+    find_toc_chunk,
     is_broad_query,
+    is_structural_query,
+    parse_action,
     pick_target_doc,
 )
 from hrag.interaction import InteractionStore, ReviewDecision, maybe_pause
@@ -97,7 +101,7 @@ from hrag.retrieval.backends import ChromaBackend, SqliteVecBackend, VectorBacke
 from hrag.retrieval.policy import RetrievalPlan, RetrievalPolicy
 from hrag.retrieval.vector import VectorStore
 from hrag.topics import KnownTopicDetector
-from hrag.types import Message, RetrievalResult
+from hrag.types import Chunk, Message, RetrievalResult
 
 logger = logging.getLogger(__name__)
 
@@ -885,10 +889,17 @@ class Orchestrator:
             "reflective": reflective_turn,
         })
 
-        # 3d-deep. Phase 13 — agentic deep read on broad/exploratory questions.
-        # Reads the single best-matching document section-by-section across
-        # several passes, visualised live. Stream-only (the document-map panel
-        # needs the SSE channel); skipped under the Phase-8 review loop.
+        # 3d-deep. Phase 13 / 13.1 — agentic multi-stage deep read. Reads the
+        # single best-matching document by choosing a navigation action each pass
+        # (read_part / search / answer), visualised live. Triggers on a broad
+        # *or* a structural/meta question ("how many chapters", "table of
+        # contents", "structure of X") — the latter so pointed factual questions
+        # whose answer lives in the document's structure get the iterative
+        # treatment too (Phase 13.1 smart escalation, part a). Stream-only (the
+        # document-map panel needs the SSE channel); skipped under the Phase-8
+        # review loop. A weak-one-pass FACTUAL turn ALSO escalates here later
+        # (part b, just before the FACTUAL→GENERAL swap).
+        _dr_structural = cfg.deep_read.structural_trigger and is_structural_query(question)
         if (
             stream
             and cfg.deep_read.enabled
@@ -896,7 +907,7 @@ class Orchestrator:
             and intent in (Intent.FACTUAL, Intent.GENERAL)
             and not reflective_turn
             and not cfg.interaction.review_enabled
-            and is_broad_query(question)
+            and (is_broad_query(question) or _dr_structural)
         ):
             dr = self._run_deep_read(
                 question=question,
@@ -905,6 +916,7 @@ class Orchestrator:
                 history_rows=history_rows,
                 emit=_emit,
                 t_start=t_start,
+                structural=_dr_structural,
             )
             if dr is not None:
                 if _emb_token is not None:
@@ -1768,6 +1780,58 @@ class Orchestrator:
         if review_decision.action == "continue" and intent == Intent.FACTUAL:
             floor = float(cfg.intent.corpus_relevance_floor)
             top_score = max((r.score for r in results), default=0.0)
+            rerank_top = max(
+                (r.rerank_score for r in results if r.rerank_score is not None),
+                default=None,
+            )
+            weak = (
+                (not results)
+                or (floor > 0.0 and top_score < floor)
+                or (rerank_top is not None and rerank_top < cfg.deep_read.weak_answer_floor)
+            )
+
+            # 3e-pre. Phase 13.1 (smart escalation, part b) — a weak FACTUAL turn
+            # whose one-pass retrieval is thin gets ESCALATED into the agentic
+            # deep read BEFORE generation (no wasted/duplicate streaming), rather
+            # than degrading to a thin RAFT answer or the GENERAL swap. Requires
+            # at least one result so the reader has a document to anchor on; a
+            # zero-result off-corpus question stays GENERAL (handled by the swap).
+            if (
+                weak
+                and results
+                and stream
+                and cfg.deep_read.enabled
+                and cfg.deep_read.auto_trigger
+                and cfg.deep_read.escalate_on_weak_answer
+                and not reflective_turn
+                and not cfg.interaction.review_enabled
+            ):
+                logger.info(
+                    "deep_read: escalating weak one-pass FACTUAL "
+                    "(top_score=%.3f floor=%.3f rerank_top=%s)",
+                    top_score, floor, rerank_top,
+                )
+                esc = self._run_deep_read(
+                    question=question,
+                    user_id=user_id,
+                    session_id=session_id,
+                    history_rows=history_rows,
+                    emit=_emit,
+                    t_start=t_start,
+                    escalated=True,
+                )
+                if esc is not None:
+                    if _emb_token is not None:
+                        try:
+                            from hrag.providers.embeddings import (  # noqa: PLC0415
+                                _session_var as _evs,
+                            )
+                            _evs.reset(_emb_token)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return esc
+                # No document matched → fall through to the swap below.
+
             if not results or (floor > 0.0 and top_score < floor):
                 logger.info(
                     "FACTUAL → GENERAL swap: top_score=%.3f floor=%.3f n_results=%d",
@@ -2263,14 +2327,26 @@ class Orchestrator:
         history_rows: list[tuple[str, str]],
         emit: Callable[[str, dict], None],
         t_start: float,
+        structural: bool = False,
+        escalated: bool = False,
     ) -> Optional[ChatResult]:
-        """Iterative section-by-section read of the single best-matching
-        document. Returns a ChatResult, or None to fall back to the normal path
+        """Agentic multi-stage read of the single best-matching document.
+
+        Each pass the planner picks ONE action from a closed menu — open a
+        specific chapter deterministically (``read_part``), search within the
+        doc (``search``), or stop and answer (``answer``) — with the full
+        document map (parts + read/unread + page labels) always in front of it.
+        ``read_part``/``read_page`` fetch a chunk_index range straight from
+        SQLite (no vector search), implementing "now go read chapter 7".
+
+        Returns a ChatResult, or None to fall back to the normal one-pass path
         (no document matched). Emits ``deep_read_start`` / ``section_opened`` /
-        ``deep_read_pass`` / ``generate_token`` / ``deep_read_followups``."""
+        ``deep_read_pass`` (carrying the chosen ``action`` + ``arg``) /
+        ``generate_token`` / ``followups``."""
         cfg = self.config
         dcfg = cfg.deep_read
         prompts_dir = Path(__file__).parent / "prompts"
+        has_page = self._chunks_has_page()
 
         # 1. Seed retrieval → choose the document to read.
         try:
@@ -2283,9 +2359,13 @@ class Orchestrator:
             return None
         doc_id, doc_title = target
 
-        # 2. Document map from the doc's chunks (chunk_index, section).
+        # 2. Document map from the doc's chunks.
+        cols = (
+            "chunk_id, chunk_index, section, chapter, page"
+            if has_page else "chunk_id, chunk_index, section"
+        )
         rows = self.db.execute(
-            "SELECT chunk_id, chunk_index, section FROM chunks "
+            f"SELECT {cols} FROM chunks "  # noqa: S608 — cols is a literal allow-list
             "WHERE doc_id = ? AND user_id = ? AND source_type = 'document' "
             "ORDER BY chunk_index",
             (doc_id, user_id),
@@ -2293,30 +2373,97 @@ class Orchestrator:
         if not rows:
             return None
         cid2idx = {r["chunk_id"]: (r["chunk_index"] or 0) for r in rows}
+
+        def _row_page(r) -> Optional[int]:
+            if not has_page:
+                return None
+            try:
+                p = r["page"]
+            except Exception:  # noqa: BLE001
+                return None
+            return p if (p is not None and p >= 0) else None
+
+        def _row_label(r) -> str:
+            if has_page:
+                try:
+                    ch = r["chapter"]
+                except Exception:  # noqa: BLE001
+                    ch = None
+                if ch:
+                    return ch
+            return r["section"] or ""
+
         parts = build_parts(
-            [((r["chunk_index"] or 0), (r["section"] or "")) for r in rows], n_parts=10
+            [((r["chunk_index"] or 0), _row_label(r)) for r in rows], n_parts=10
         )
+        idx2page = {(r["chunk_index"] or 0): _row_page(r) for r in rows}
+        pages_available = any(v is not None for v in idx2page.values())
+
+        def _part_pages(p) -> tuple[Optional[int], Optional[int]]:
+            pgs = [idx2page.get(i) for i in range(p.lo, p.hi + 1)]
+            pgs = [x for x in pgs if x is not None]
+            return (min(pgs), max(pgs)) if pgs else (None, None)
+
+        part_pages = {p.idx: _part_pages(p) for p in parts}
+
+        def _part_public(p) -> dict:
+            d = p.public()
+            lo_pg, hi_pg = part_pages.get(p.idx, (None, None))
+            if lo_pg is not None:
+                d["page_lo"], d["page_hi"] = lo_pg, hi_pg
+            return d
+
         state = DeepReadState(doc_id=doc_id, doc_title=doc_title, parts=parts)
         emit("deep_read_start", {
             "doc_id": doc_id,
             "doc_title": doc_title,
             "question": question,
-            "parts": [p.public() for p in parts],
+            "parts": [_part_public(p) for p in parts],
+            "pages_available": pages_available,
+            "structural": structural,
+            "escalated": escalated,
         })
-        logger.info("deep_read: reading %r across %d parts", doc_title, len(parts))
+        logger.info(
+            "deep_read: reading %r across %d parts (structural=%s escalated=%s)",
+            doc_title, len(parts), structural, escalated,
+        )
 
         all_results: list[RetrievalResult] = []
-        current_query = question
 
-        # 3. Read passes — each plans the next from what it just read.
-        for pass_no in range(1, dcfg.max_passes + 1):
-            state.passes = pass_no
+        def _page_range_to_idx(lo_pg, hi_pg) -> tuple[Optional[int], Optional[int]]:
+            idxs = [
+                i for i, pg in idx2page.items()
+                if pg is not None and lo_pg <= pg <= hi_pg
+            ]
+            return (min(idxs), max(idxs)) if idxs else (None, None)
+
+        def _record(fresh: list[RetrievalResult]) -> None:
+            touched: dict = {}
+            for r in fresh:
+                cid = getattr(r.chunk, "chunk_id", None)
+                if cid:
+                    state.seen_chunk_ids.add(cid)
+                idx = cid2idx.get(cid, getattr(r.chunk, "chunk_index", 0) or 0)
+                p, _ = state.open_for_index(idx)
+                if p is not None:
+                    touched[p.idx] = p
+            all_results.extend(fresh)
+            for p in sorted(touched.values(), key=lambda x: x.idx):
+                payload = {"idx": p.idx, "label": p.label, "quotes": p.quotes}
+                lo_pg, hi_pg = part_pages.get(p.idx, (None, None))
+                if lo_pg is not None:
+                    payload["page_lo"], payload["page_hi"] = lo_pg, hi_pg
+                emit("section_opened", payload)
+
+        def _search_within_doc(q: str) -> list[RetrievalResult]:
             try:
                 cand = self.retriever.retrieve(
-                    current_query, user_id, top_k=max(40, dcfg.chunks_per_pass * 6)
+                    q or question, user_id,
+                    top_k=max(40, dcfg.chunks_per_pass * 6),
+                    where={"doc_id": {"$eq": doc_id}},
                 )
             except Exception:  # noqa: BLE001
-                logger.exception("deep_read: pass %d retrieval failed", pass_no)
+                logger.exception("deep_read: search retrieval failed")
                 cand = []
             fresh: list[RetrievalResult] = []
             for r in cand:
@@ -2329,42 +2476,148 @@ class Orchestrator:
                 fresh.append(r)
                 if len(fresh) >= dcfg.chunks_per_pass:
                     break
-            if not fresh:
+            return fresh
+
+        def _force_next_unread() -> list[RetrievalResult]:
+            for p in state.parts:
+                if p.status != "read":
+                    got = self._read_part_chunks(
+                        doc_id, user_id, p.lo, p.hi,
+                        exclude=state.seen_chunk_ids,
+                        limit=dcfg.chunks_per_pass, has_page=has_page,
+                    )
+                    if got:
+                        return got
+            return []
+
+        # 3. Pass 0 — seed gives the planner something to plan from.
+        last_results: list[RetrievalResult] = []
+        for r in seed:
+            ch = r.chunk
+            if getattr(ch, "doc_id", None) != doc_id:
+                continue
+            cid = getattr(ch, "chunk_id", None)
+            if not cid or cid in state.seen_chunk_ids:
+                continue
+            last_results.append(r)
+            if len(last_results) >= dcfg.chunks_per_pass:
                 break
+        if last_results:
+            _record(last_results)
 
-            parts_touched: dict = {}
-            for r in fresh:
-                cid = r.chunk.chunk_id
-                state.seen_chunk_ids.add(cid)
-                p, _ = state.open_for_index(cid2idx.get(cid, 0))
-                if p is not None:
-                    parts_touched[p.idx] = p
-            all_results.extend(fresh)
-
-            for p in sorted(parts_touched.values(), key=lambda x: x.idx):
-                emit("section_opened", {"idx": p.idx, "label": p.label, "quotes": p.quotes})
-
-            note, next_query, done = self._deep_read_pass_llm(
-                prompts_dir, question=question, doc_title=doc_title,
-                notes_so_far=state.notes, new_results=fresh,
+        # 4. Read→plan passes — the planner picks one navigation action each pass.
+        for pass_no in range(1, dcfg.max_passes + 1):
+            state.passes = pass_no
+            action = self._deep_read_plan_action(
+                prompts_dir,
+                state=state, question=question, doc_title=doc_title,
+                last_results=last_results, pages_available=pages_available,
+                part_pages=part_pages,
             )
-            if note:
-                state.notes.append(note)
+            if action.note:
+                state.notes.append(action.note)
+
+            # Narration arg (read by the live document-map panel) — built BEFORE
+            # executing so the UI can say "Opening Chapter 7" immediately.
+            arg: dict = {}
+            if action.kind == "read_part" and action.part_idx is not None:
+                tp = state.parts[action.part_idx]
+                arg = {"idx": tp.idx, "label": tp.label}
+                lo_pg, hi_pg = part_pages.get(tp.idx, (None, None))
+                if lo_pg is not None:
+                    arg["page_lo"], arg["page_hi"] = lo_pg, hi_pg
+            elif action.kind == "read_page":
+                arg = {"page_lo": action.lo, "page_hi": action.hi}
+            elif action.kind == "search":
+                arg = {"query": action.query}
             emit("deep_read_pass", {
                 "pass": pass_no,
-                "note": note,
-                "next_query": next_query,
-                "sections_read": sorted(parts_touched),
+                "action": action.kind,
+                "arg": arg,
+                "note": action.note,
+                # Back-compat keys for older frontends:
+                "next_query": action.query if action.kind == "search" else "",
+                "sections_read": [],
             })
-            # Honour the model's stop signal only after min_passes — small
-            # models tend to bail after one pass, which undersells the read.
-            # When continuing without a fresh query, fall back to the original
-            # question so the next pass pulls the next-best *unseen* chunks.
-            if (done or not next_query.strip()) and pass_no >= dcfg.min_passes:
-                break
-            current_query = next_query.strip() or question
 
-        # 4. Final synthesis (streamed into the answer bubble).
+            # Decide & execute the action.
+            if action.kind == "answer":
+                if pass_no >= dcfg.min_passes:
+                    break
+                fresh = _force_next_unread()  # too early to stop — keep reading
+            elif action.kind == "read_part":
+                fresh = self._read_part_chunks(
+                    doc_id, user_id, action.lo, action.hi,
+                    exclude=state.seen_chunk_ids,
+                    limit=dcfg.chunks_per_pass, has_page=has_page,
+                )
+            elif action.kind == "read_page":
+                lo_i, hi_i = _page_range_to_idx(action.lo, action.hi)
+                fresh = (
+                    _search_within_doc(question) if lo_i is None
+                    else self._read_part_chunks(
+                        doc_id, user_id, lo_i, hi_i,
+                        exclude=state.seen_chunk_ids,
+                        limit=dcfg.chunks_per_pass, has_page=has_page,
+                    )
+                )
+            else:  # search
+                fresh = _search_within_doc(action.query)
+
+            if not fresh:
+                if pass_no >= dcfg.min_passes:
+                    break
+                fresh = _force_next_unread()
+                if not fresh:
+                    break
+
+            _record(fresh)
+            last_results = fresh
+            if state.remaining() == 0 and pass_no >= dcfg.min_passes:
+                break
+
+        # 4b. Structural scan-all (optional) — open every remaining part for full
+        # coverage before a counting/structure synthesis. Cheap (all SQL).
+        if structural and dcfg.structural_scan_all:
+            for p in state.parts:
+                if p.status != "read":
+                    got = self._read_part_chunks(
+                        doc_id, user_id, p.lo, p.hi,
+                        exclude=state.seen_chunk_ids,
+                        limit=dcfg.chunks_per_pass, has_page=has_page,
+                    )
+                    if got:
+                        _record(got)
+
+        # 5. Structural block — for "how many chapters / table of contents" the
+        # honest answer is derived from the document's visible structure, not
+        # from any single chunk. Enumerate in code; the model presents it with a
+        # caveat and never invents chapters.
+        structural_block = ""
+        if structural:
+            labels = distinct_chapter_labels(rows)
+            toc = find_toc_chunk(self._deep_read_early_rows(doc_id, user_id))
+            toc_block = (
+                toc[1].strip() if toc
+                else "(no explicit table of contents found in the text)"
+            )
+            listing = (
+                "\n".join(f"{i}. {lab}" for i, lab in enumerate(labels, 1))
+                or "(no clean headings detected)"
+            )
+            structural_block = (
+                "### Document structure (derived from headings/TOC — may be approximate)\n"
+                f"Distinct chapter/section headings detected: {len(labels)}\n"
+                f"Coarse parts the reader split the document into: {len(parts)}\n\n"
+                f"Headings:\n{listing}\n\n"
+                f"Table of contents found in the document:\n{toc_block}\n\n"
+                "When the user asks how many chapters/sections/pages or for the table "
+                "of contents, base your answer on this structure. State plainly that "
+                "the count is derived from the document's visible headings and may be "
+                "approximate. Never invent chapters not listed here.\n"
+            )
+
+        # 6. Final synthesis (streamed into the answer bubble).
         synth_prompt = (prompts_dir / "deep_read_synthesize.md").read_text(
             encoding="utf-8"
         ).format(
@@ -2372,6 +2625,7 @@ class Orchestrator:
             question=question,
             notes="\n".join(f"- {n}" for n in state.notes) or "(no notes gathered)",
             passages=_format_passages(all_results[:8]),
+            structural_block=structural_block,
         )
         emit("generate_start", {"deep_read": True})
         from hrag.types import GenerationRequest  # noqa: PLC0415
@@ -2386,43 +2640,142 @@ class Orchestrator:
         answer = strip_uncertain("".join(out).strip())
         emit("generate", {"answer_chars": len(answer), "deep_read": True})
 
-        # 5. Follow-up suggestions grounded in what was read.
+        # 7. Follow-up suggestions grounded in what was read.
         chips = self._deep_read_followups(prompts_dir, question, answer, dcfg.followups)
         if chips:
             emit("followups", {"chips": chips})  # reuse the existing chip UI
 
-        # 6. Persist + return.
+        # 8. Persist + return.
         self._save_message(session_id, user_id, "assistant", answer)
         self.db.commit()
         self._session_last_intent[session_id] = Intent.FACTUAL
-        emit("done", {"total_s": time.time() - t_start, "deep_read": True,
-                      "passes": state.passes, "parts_read": len(parts) - state.remaining()})
+        emit("done", {
+            "total_s": time.time() - t_start, "deep_read": True,
+            "passes": state.passes, "parts_read": len(parts) - state.remaining(),
+            "structural": structural, "escalated": escalated,
+        })
         return ChatResult(
             answer=answer, session_id=session_id, sources=all_results, prompt=synth_prompt
         )
 
-    def _deep_read_pass_llm(
-        self, prompts_dir: Path, *, question: str, doc_title: str,
-        notes_so_far: list[str], new_results: list[RetrievalResult],
-    ) -> tuple[str, str, bool]:
-        """One planning call: returns (note, next_query, done)."""
+    def _chunks_has_page(self) -> bool:
+        """True when the ``chunks`` table carries the Phase-13.1 ``page`` +
+        ``chapter`` columns. Cached after the first PRAGMA so the deep read
+        degrades gracefully (page reads → part reads) on a pre-13.1 DB."""
+        cached = getattr(self, "_chunks_has_page_cache", None)
+        if cached is not None:
+            return cached
+        has = False
+        try:
+            info = self.db.execute("PRAGMA table_info(chunks)").fetchall()
+            names = {row["name"] for row in info}
+            has = "page" in names and "chapter" in names
+        except Exception:  # noqa: BLE001
+            has = False
+        self._chunks_has_page_cache = has
+        return has
+
+    def _read_part_chunks(
+        self, doc_id: str, user_id: str, lo: Optional[int], hi: Optional[int],
+        *, exclude: set, limit: int, has_page: bool = False,
+    ) -> list[RetrievalResult]:
+        """Deterministically read the document's chunks in the ``[lo, hi]``
+        chunk_index range straight from SQLite — NO vector search. This is the
+        engine of the ``read_part`` / ``read_page`` actions ("go read chapter
+        7"). Skips already-seen chunks; caps at ``limit``."""
+        if lo is None or hi is None:
+            return []
+        cols = (
+            "chunk_id, doc_id, user_id, text, title, section, subsection, "
+            "chunk_index, source_type"
+        )
+        if has_page:
+            cols += ", page, chapter"
+        rows = self.db.execute(
+            f"SELECT {cols} FROM chunks "  # noqa: S608 — cols is a literal allow-list
+            "WHERE doc_id = ? AND user_id = ? AND source_type = 'document' "
+            "AND chunk_index BETWEEN ? AND ? ORDER BY chunk_index",
+            (doc_id, user_id, lo, hi),
+        ).fetchall()
+        out: list[RetrievalResult] = []
+        for r in rows:
+            cid = r["chunk_id"]
+            if cid in exclude:
+                continue
+            page: Optional[int] = None
+            meta: dict = {}
+            if has_page:
+                try:
+                    pg = r["page"]
+                    page = pg if (pg is not None and pg >= 0) else None
+                except Exception:  # noqa: BLE001
+                    page = None
+                try:
+                    if r["chapter"]:
+                        meta["chapter"] = r["chapter"]
+                except Exception:  # noqa: BLE001
+                    pass
+            text = r["text"] or ""
+            chunk = Chunk(
+                chunk_id=cid,
+                doc_id=r["doc_id"],
+                user_id=r["user_id"],
+                text=text,
+                embedding_text=text,
+                title=r["title"] or "",
+                section=r["section"] or "",
+                subsection=r["subsection"] or "",
+                chunk_index=r["chunk_index"] or 0,
+                source_type=r["source_type"] or "document",
+                page=page,
+                metadata=meta,
+            )
+            out.append(RetrievalResult(chunk=chunk, score=0.0, retriever="deep_read"))
+            if len(out) >= limit:
+                break
+        return out
+
+    def _deep_read_early_rows(self, doc_id: str, user_id: str, limit: int = 20) -> list:
+        """First ``limit`` chunks (chunk_index, text) of a document — fed to
+        ``find_toc_chunk`` to surface a real table-of-contents chunk."""
+        return self.db.execute(
+            "SELECT chunk_index, text FROM chunks "
+            "WHERE doc_id = ? AND user_id = ? AND source_type = 'document' "
+            "ORDER BY chunk_index LIMIT ?",
+            (doc_id, user_id, limit),
+        ).fetchall()
+
+    def _deep_read_plan_action(
+        self, prompts_dir: Path, *, state: DeepReadState, question: str,
+        doc_title: str, last_results: list[RetrievalResult],
+        pages_available: bool, part_pages: dict,
+    ):
+        """One planning call: render the document map + the passages just read,
+        ask the weak model to pick ONE action, then parse + harden it via the
+        pure ``parse_action`` (clamps / redirects / downgrades — never raises)."""
+        dcfg = self.config.deep_read
+        structure = _format_doc_map(state, part_pages)
         prompt = (prompts_dir / "deep_read_pass.md").read_text(encoding="utf-8").format(
             doc_title=doc_title,
             question=question,
-            notes_so_far="\n".join(f"- {n}" for n in notes_so_far) or "(nothing yet)",
-            passages=_format_passages(new_results),
+            structure=structure,
+            notes_so_far="\n".join(f"- {n}" for n in state.notes) or "(nothing yet)",
+            passages=_format_passages(last_results),
         )
         try:
-            raw = self.llm.complete(prompt, temperature=0.1, max_tokens=300)
+            raw = self.llm.complete(
+                prompt, temperature=0.1, max_tokens=dcfg.plan_max_tokens
+            )
         except Exception:  # noqa: BLE001
-            logger.exception("deep_read: pass-plan LLM call failed")
-            return "", "", True
-        data = _loose_json(raw)
-        return (
-            str(data.get("note", "")).strip(),
-            str(data.get("next_query", "")).strip(),
-            bool(data.get("done", False)),
-        )
+            logger.exception("deep_read: plan LLM call failed")
+            # Keep the read alive: answer past min_passes, else search the
+            # original question for the next-best unseen chunks.
+            fallback = (
+                {"action": "answer"} if state.passes >= dcfg.min_passes
+                else {"action": "search", "query": ""}
+            )
+            return parse_action(fallback, state, pages_available=pages_available)
+        return parse_action(_loose_json(raw), state, pages_available=pages_available)
 
     def _deep_read_followups(
         self, prompts_dir: Path, question: str, answer: str, n: int
@@ -2704,6 +3057,19 @@ def _format_passages(results: list[RetrievalResult]) -> str:
         header = f"[Source {i} | {chunk.title or 'Untitled'} | {chunk.section or 'N/A'}]"
         parts.append(f"{header}\n{chunk.text}")
     return "\n\n".join(parts)
+
+
+def _format_doc_map(state: "DeepReadState", part_pages: dict) -> str:
+    """Render the document map as a numbered pick-list for the deep-read planner.
+    Reflects each part's live read/unread status so the weak model only has to
+    choose an index from a visible list. Phase 13.1."""
+    lines: list[str] = []
+    for p in state.parts:
+        status = "READ" if p.status == "read" else "unread"
+        lo_pg, hi_pg = part_pages.get(p.idx, (None, None))
+        pg = f" (pages {lo_pg}-{hi_pg})" if lo_pg is not None else ""
+        lines.append(f" [{p.idx}] {p.label}{pg}    {status}")
+    return "\n".join(lines) or "(document has no parts)"
 
 
 # Words that show up in profile renders but don't identify the user — ignored

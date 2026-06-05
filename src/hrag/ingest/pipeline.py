@@ -219,7 +219,11 @@ class IngestPipeline:
 
         # 2. Chunk
         _emit("chunk", message="Chunking", n_done=0, n_total=1)
-        chunks = chunk_document(doc, self.config.chunking)
+        chunks = chunk_document(
+            doc,
+            self.config.chunking,
+            page_metadata=self.config.ingest.page_metadata_enabled,
+        )
         _emit(
             "chunk",
             message=f"Made {len(chunks)} chunks",
@@ -510,6 +514,18 @@ class IngestPipeline:
     def _upsert_chunks(self, chunks: list[Chunk]) -> None:
         if not chunks:
             return
+
+        # Guard against orphan rows from a shrinking re-ingest (e.g. previously
+        # N chunks, now M < N after quality filter or reference truncation).
+        # The Chroma side already does delete_doc → add_chunks; mirror that here.
+        # All chunks in the list share the same doc_id and user_id.
+        doc_id = chunks[0].doc_id
+        user_id = chunks[0].user_id
+        self.db.execute(
+            "DELETE FROM chunks WHERE doc_id = ? AND user_id = ?",
+            (doc_id, user_id),
+        )
+
         rows = [
             (
                 chunk.chunk_id,
@@ -522,6 +538,8 @@ class IngestPipeline:
                 chunk.chunk_index,
                 chunk.token_count,
                 chunk.source_type,
+                chunk.page,
+                chunk.metadata.get("chapter", "") if chunk.metadata else "",
                 json.dumps(chunk.metadata),
             )
             for chunk in chunks
@@ -530,8 +548,8 @@ class IngestPipeline:
             """
             INSERT OR REPLACE INTO chunks
                 (chunk_id, doc_id, user_id, text, title, section, subsection,
-                 chunk_index, token_count, source_type, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 chunk_index, token_count, source_type, page, chapter, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )

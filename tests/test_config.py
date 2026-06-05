@@ -35,6 +35,46 @@ def test_load_config_defaults_no_file(tmp_path: Path, monkeypatch) -> None:
     assert cfg.context.history_token_budget == 4000
 
 
+def test_deep_read_and_ingest_phase13_1_defaults(tmp_path: Path, monkeypatch) -> None:
+    """Phase 13.1 — agentic deep-read + page-metadata flags load with defaults."""
+    monkeypatch.chdir(tmp_path)
+    for k in list(os.environ):
+        if k.startswith("HRAG_"):
+            monkeypatch.delenv(k)
+
+    cfg = load_config()
+
+    # Agentic deep-read smart-escalation defaults.
+    assert cfg.deep_read.enabled is True
+    assert cfg.deep_read.structural_trigger is True
+    assert cfg.deep_read.escalate_on_weak_answer is True
+    assert cfg.deep_read.weak_answer_floor == 0.0
+    assert cfg.deep_read.plan_max_tokens == 200
+    assert cfg.deep_read.structural_scan_all is False
+    assert cfg.deep_read.action_repeat_guard is True
+
+    # Ingest page/chapter metadata default-on.
+    assert cfg.ingest.page_metadata_enabled is True
+
+
+def test_old_yaml_without_phase13_1_keys_still_loads(tmp_path: Path, monkeypatch) -> None:
+    """A pre-13.1 config.yaml (no new keys) must still load with sane defaults."""
+    monkeypatch.chdir(tmp_path)
+    for k in list(os.environ):
+        if k.startswith("HRAG_"):
+            monkeypatch.delenv(k)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"deep_read": {"max_passes": 5}, "ingest": {"use_nougat": False}}),
+        encoding="utf-8",
+    )
+
+    cfg = load_config()
+
+    assert cfg.deep_read.max_passes == 5                 # explicit override honoured
+    assert cfg.deep_read.structural_trigger is True      # new key defaulted
+    assert cfg.ingest.page_metadata_enabled is True      # new key defaulted
+
+
 def test_load_config_sets_project_root(tmp_path: Path, monkeypatch) -> None:
     """project_root should be the cwd when load_config() is called."""
     monkeypatch.chdir(tmp_path)

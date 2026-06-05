@@ -2,7 +2,7 @@
 
 A personal RAG chatbot for 10–1000 documents with **hierarchical reasoning**, **growing per-user memory**, and a **modular** architecture you can incrementally extend. Built around a synthesis of recent RAG papers (HippoRAG2, GraphRAG, HeteRAG, RAFT, RAGate, MemoRAG, KG2RAG, ACP-RAG, and others).
 
-> **Status**: Phases 1–13 complete — vector RAG · KG hierarchy · personalization (memory + taxonomy) · compaction & gating · web GUI · real pluggable backends · math-aware retrieval · interactive review loop · speed/observability wins · modular embedding backends · reflective personal answers · bilingual GUI + keyword taxonomy · **agentic deep-read**. ~1100 unit tests passing. See `CLAUDE.md` for the full phase-by-phase log and load-bearing contracts.
+> **Status**: Phases 1–13 complete — vector RAG · KG hierarchy · personalization (memory + taxonomy) · compaction & gating · web GUI · real pluggable backends · math-aware retrieval · interactive review loop · speed/observability wins · modular embedding backends · reflective personal answers · bilingual GUI + keyword taxonomy · **agentic deep-read**. ~1130 unit tests passing. See `CLAUDE.md` for the full phase-by-phase log and load-bearing contracts.
 
 ## What's working today (Phases 1–13)
 
@@ -21,14 +21,14 @@ A personal RAG chatbot for 10–1000 documents with **hierarchical reasoning**, 
 
 **Extensibility & backends (P5–7, P10)** — real **sqlite-vec** and **Neo4j** backends behind the Vector/KG protocols; adaptive top-k & retriever per intent; math-aware retrieval (Unicode + LaTeX); modular embedding backends (ONNX / fp16 / OpenVINO / `model2vec`, `bge-small`) flippable from `config.yaml`.
 
-**Agentic deep-read (P13)** — broad questions ("tell me about X") trigger an iterative, section-by-section read of the best-matching document, visualised live as a **document-map panel** (sections open `○→✓`), ending with follow-up suggestions. See [Deep read](#deep-read-phase-13) below.
+**Agentic deep-read (P13)** — broad or structural/meta questions ("tell me about X", "how many chapters?", "what's the structure?") trigger an **agentic document reader** that navigates by choosing per-pass actions (`read_part` opens a specific chapter's chunk-index range directly from SQLite, `search` queries within the doc, `answer` stops). Each chunk carries a page number and clean chapter label; weak one-pass retrieval also auto-escalates. The process is visualised live as a **document-map panel** with action narration, ending with follow-up suggestions. See [Deep read](#deep-read-phase-13) below.
 
 **Interfaces**
 - Pluggable **Ollama / OpenAI / Anthropic** LLM backends and **sentence-transformers / OpenAI / model2vec** embedding backends behind one interface each.
 - Multi-user-ready SQLite schema (single user is the default).
 - Interactive CLI with **live progress display** and slash commands.
 - **Web GUI** (`hrag web`) — FastAPI + SSE SPA modelled on claude.ai / ChatGPT: streaming chat (clean answer + collapsible reasoning), sources, sessions, memories, document upload, feedback, an editable taxonomy/keyword view, a profile drawer, a D3 knowledge-graph view, KaTeX math, and Persian/RTL typography. An optional **interactive review loop** (`interaction.review_enabled`) pauses between retrieval and answer for human steering.
-- ~1100 unit tests passing (heavy-dep tests skip cleanly).
+- ~1130 unit tests passing (heavy-dep tests skip cleanly).
 
 ## Quick start
 
@@ -213,25 +213,27 @@ hrag taxonomy clear              # drop the tree (preserves doc-meta cache)
 
 ## Deep read (Phase 13)
 
-Ask a broad, exploratory question — *"tell me about the Red Book"*, *"give me an overview of HippoRAG"*, *"walk me through this paper"* — and HRAG switches from a single retrieve→answer pass to an **iterative deep read** of the single most relevant document:
+Ask a broad or structural question — *"tell me about the Red Book"*, *"how many chapters does it have?"*, *"walk me through this paper"* — and HRAG switches from a single retrieve→answer pass to an **agentic document reader**:
 
-1. **Pick the document** from a seed retrieval, and lay it out as a bounded **document map** of ordered parts.
-2. **Read in passes** — each pass pulls a few fresh (unseen) chunks, drafts a short note on what they add, and decides what to look for next from what it just learned.
-3. **Visualise it live** — the web GUI shows a *Reading: &lt;doc&gt;* panel whose parts open (`○ → ✓`, with quote counts) as they're read, the running synthesis building below, the final answer streaming in.
-4. **Know when to stop** — on a plateau (no new sections), the model's own signal (after `min_passes`), or a hard pass cap — then propose follow-up questions.
+1. **Pick the document** from a seed retrieval, lay it out as a bounded **document map** of ordered parts with page numbers and chapter labels.
+2. **Navigate by action** — each pass the planner chooses one action from a closed menu: `read_part` opens a specific chapter's chunks directly from SQLite (no vector search), `search` retrieves within the document, `answer` stops. The full map is always in the prompt.
+3. **Visualise it live** — the web GUI shows a *Reading: &lt;doc&gt;* panel with a live action narrator ("Opening Ch.7 (p.142–151)…"), parts opening `○ → ✓`, the streaming answer below, and follow-up suggestions.
+4. **Know when to stop** — on a plateau, model `answer` signal (after `min_passes`), or a hard cap.
 
-It's on by default and **auto-triggers** on broad phrasings (precise questions still use the fast single pass). Tune it under `deep_read:` in `config.yaml`:
+Also triggers on structural/meta questions ("how many chapters?") and auto-escalates when one-pass retrieval is weak. Tune under `deep_read:` in `config.yaml`:
 
 ```yaml
 deep_read:
   enabled: true
-  auto_trigger: true     # fire automatically on broad/exploratory questions
-  max_passes: 4          # hard cap on read→plan iterations
-  min_passes: 2          # always iterate at least this many while the doc has more
+  auto_trigger: true        # fire on broad/exploratory questions
+  structural_trigger: true  # also fire on structural/meta questions
+  escalate_on_weak_answer: true
+  max_passes: 4
+  min_passes: 2
   chunks_per_pass: 6
 ```
 
-> Part labels are only as good as the document's ingested `section` metadata; messy PDFs yield bounded-but-noisy labels (falling back to "Part N"). A stronger planning model reads deeper before stopping.
+> Part labels and page numbers come from `page_metadata_enabled` in `IngestConfig` — re-ingest after enabling for full chapter navigation.
 
 ## Tuning retrieval quality
 
@@ -376,7 +378,7 @@ src/hrag/
 | 10 | Modular embedding backends: ONNX / fp16 / OpenVINO / model2vec, `bge-small`, dim-mismatch guard | ✅ Done | model2vec |
 | 11 | Reflective / opinion personal answers (grounded impression, switchable detection) | ✅ Done | — |
 | 12 | Bilingual visual GUI (KaTeX, Persian/RTL) + hybrid keyword-routing taxonomy | ✅ Done | YAKE |
-| 13 | **Agentic deep-read**: iterative section-by-section read with a live document-map | ✅ Done | IRCoT / FLARE-style iterative retrieval |
+| 13 | **Agentic deep-read**: planner-action navigation (read_part/search/answer), page+chapter metadata, structural/weak-answer escalation, live document-map | ✅ Done | IRCoT / FLARE-style iterative retrieval |
 
 
 ## Running the tests

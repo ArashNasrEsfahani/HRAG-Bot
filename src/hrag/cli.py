@@ -80,21 +80,82 @@ def cmd_ingest(path: str, user: Optional[str], recursive: bool) -> None:
         sys.exit(1)
 
     try:
+        from rich.progress import (  # noqa: PLC0415
+            BarColumn,
+            MofNCompleteColumn,
+            Progress,
+            SpinnerColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
         cfg = load_config()
         orch = Orchestrator(cfg)
         user_id = user or cfg.user.default_user_id
 
         if target.is_dir():
-            docs = orch.ingest.ingest_directory(target, user_id, recursive=recursive)
+            # Discover the file list first so we can show a total count.
+            from hrag.ingest.pipeline import _SUPPORTED_EXTENSIONS, _MAX_FILE_BYTES  # noqa: PLC0415
+
+            pattern = "**/*" if recursive else "*"
+            candidates = [
+                p for p in sorted(target.resolve().glob(pattern))
+                if p.is_file() and p.suffix.lower() in _SUPPORTED_EXTENSIONS
+            ]
+            if not candidates:
+                console.print("[yellow]No supported files found.[/yellow]")
+                orch.close()
+                return
+
+            docs = []
+            errors: list[str] = []
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold]ingest[/bold]"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TextColumn("•"),
+                TimeElapsedColumn(),
+                TextColumn("• {task.fields[filename]}"),
+                console=console,
+            ) as bar:
+                task = bar.add_task(
+                    "files", total=len(candidates), filename="starting..."
+                )
+                for file_path in candidates:
+                    bar.update(task, filename=file_path.name)
+                    file_size = file_path.stat().st_size
+                    if file_size > _MAX_FILE_BYTES:
+                        console.print(
+                            f"  [yellow]SKIP[/yellow] {file_path.name} "
+                            f"({file_size / 1024 / 1024:.1f} MB > 50 MB limit)"
+                        )
+                        bar.advance(task)
+                        continue
+                    try:
+                        doc = orch.ingest.ingest_path(file_path, user_id)
+                        docs.append(doc)
+                    except Exception as exc:  # noqa: BLE001
+                        console.print(
+                            f"  [red]ERROR[/red] {file_path.name}: {exc}"
+                        )
+                        errors.append(file_path.name)
+                    bar.advance(task)
+
             total_chunks = sum(
                 orch.db.execute(
                     "SELECT COUNT(*) as n FROM chunks WHERE doc_id = ?", (d.doc_id,)
                 ).fetchone()["n"]
                 for d in docs
             )
+            error_note = (
+                f"  [yellow]{len(errors)} file(s) failed — see errors above.[/yellow]"
+                if errors else ""
+            )
             console.print(
                 f"Ingested [bold]{len(docs)}[/bold] documents "
-                f"([bold]{total_chunks}[/bold] chunks total)."
+                f"([bold]{total_chunks}[/bold] chunks total).{error_note}"
             )
         else:
             doc = orch.ingest.ingest_path(target, user_id)

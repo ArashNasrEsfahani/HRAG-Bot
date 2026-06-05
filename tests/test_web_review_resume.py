@@ -26,13 +26,25 @@ Coverage:
 * ``test_sse_relay_followups_event`` — same for ``followups``.
 * ``test_sse_relay_start_event_carries_turn_id`` — when the orchestrator
   emits a ``start`` event with a ``turn_id``, the relay must preserve it.
+* ``test_sse_relay_deep_read_pass_read_part`` — ``deep_read_pass`` with
+  ``action="read_part"`` and ``page_lo/page_hi`` in ``arg`` is forwarded as
+  a dedicated ``deep_read_pass`` event with all fields intact.
+* ``test_sse_relay_deep_read_pass_search`` — ``deep_read_pass`` with
+  ``action="search"`` and ``arg.query`` survives the relay.
+* ``test_sse_relay_deep_read_start_with_pages`` — ``deep_read_start`` with
+  a part carrying ``page_lo``/``page_hi`` and ``pages_available=True``
+  survives.
+* ``test_sse_relay_section_opened_with_pages`` — ``section_opened`` with
+  ``page_lo``/``page_hi`` survives.
+* ``test_sse_relay_deep_read_pass_no_action_back_compat`` — old-shape
+  ``deep_read_pass`` (no ``action`` key) still forwards as
+  ``deep_read_pass``.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -367,3 +379,130 @@ def test_sse_relay_start_event_carries_turn_id(client: TestClient) -> None:
     assert payload_seen.get("turn_id") == "turn-42", (
         f"turn_id missing from start event payload: {payload_seen!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SSE relay — Phase 13 deep-read upgraded payload tests
+# ---------------------------------------------------------------------------
+
+
+def test_sse_relay_deep_read_pass_read_part(client: TestClient) -> None:
+    """``deep_read_pass`` with action='read_part' and page_lo/page_hi in arg
+    must be forwarded as a dedicated ``deep_read_pass`` SSE event with all
+    new payload fields intact (Contract 60)."""
+    payload = {
+        "pass": 2,
+        "action": "read_part",
+        "arg": {"idx": 6, "label": "Ch. 7", "page_lo": 142, "page_hi": 151},
+        "note": "Found the key result in this chapter.",
+        "next_query": "methodology",
+        "sections_read": [0, 1, 2],
+    }
+    events = _drive_chat_with_events(client, [("deep_read_pass", payload)])
+    event_types = [e["event"] for e in events]
+    assert "deep_read_pass" in event_types, (
+        f"deep_read_pass missing from SSE stream; got {event_types}"
+    )
+    drp = next(e for e in events if e["event"] == "deep_read_pass")
+    data = drp["data"]
+    assert data.get("action") == "read_part", f"action mismatch: {data}"
+    assert isinstance(data.get("arg"), dict), f"arg not a dict: {data}"
+    assert data["arg"].get("page_lo") == 142, f"page_lo missing: {data}"
+    assert data["arg"].get("page_hi") == 151, f"page_hi missing: {data}"
+    assert data["arg"].get("label") == "Ch. 7", f"label missing: {data}"
+    assert data.get("pass") == 2, f"pass field missing: {data}"
+
+
+def test_sse_relay_deep_read_pass_search(client: TestClient) -> None:
+    """``deep_read_pass`` with action='search' and arg.query must forward
+    arg.query intact."""
+    payload = {
+        "pass": 3,
+        "action": "search",
+        "arg": {"query": "confrontation"},
+        "note": "",
+    }
+    events = _drive_chat_with_events(client, [("deep_read_pass", payload)])
+    event_types = [e["event"] for e in events]
+    assert "deep_read_pass" in event_types, (
+        f"deep_read_pass missing from SSE stream; got {event_types}"
+    )
+    drp = next(e for e in events if e["event"] == "deep_read_pass")
+    data = drp["data"]
+    assert data.get("action") == "search", f"action mismatch: {data}"
+    assert data.get("arg", {}).get("query") == "confrontation", f"query missing: {data}"
+
+
+def test_sse_relay_deep_read_start_with_pages(client: TestClient) -> None:
+    """``deep_read_start`` with a part carrying page_lo/page_hi and
+    pages_available=True must survive the relay as a dedicated event."""
+    payload = {
+        "doc_id": "doc-1",
+        "doc_title": "A Novel",
+        "question": "What happens at the end?",
+        "pages_available": True,
+        "structural": False,
+        "escalated": False,
+        "parts": [
+            {"idx": 0, "label": "Part 1", "lo": 0, "hi": 5,
+             "status": "unread", "quotes": 0, "page_lo": 1, "page_hi": 42},
+            {"idx": 1, "label": "Part 2", "lo": 6, "hi": 10,
+             "status": "unread", "quotes": 0},
+        ],
+    }
+    events = _drive_chat_with_events(client, [("deep_read_start", payload)])
+    event_types = [e["event"] for e in events]
+    assert "deep_read_start" in event_types, (
+        f"deep_read_start missing from SSE stream; got {event_types}"
+    )
+    drs = next(e for e in events if e["event"] == "deep_read_start")
+    data = drs["data"]
+    assert data.get("pages_available") is True, f"pages_available missing: {data}"
+    parts = data.get("parts", [])
+    assert len(parts) == 2, f"parts count wrong: {data}"
+    # First part should carry page metadata.
+    first = parts[0]
+    assert first.get("page_lo") == 1, f"page_lo missing on first part: {first}"
+    assert first.get("page_hi") == 42, f"page_hi missing on first part: {first}"
+
+
+def test_sse_relay_section_opened_with_pages(client: TestClient) -> None:
+    """``section_opened`` with page_lo/page_hi must be forwarded as a
+    dedicated ``section_opened`` event with the page fields intact."""
+    payload = {"idx": 3, "label": "Chapter 4", "quotes": 2,
+               "page_lo": 88, "page_hi": 104}
+    events = _drive_chat_with_events(client, [("section_opened", payload)])
+    event_types = [e["event"] for e in events]
+    assert "section_opened" in event_types, (
+        f"section_opened missing from SSE stream; got {event_types}"
+    )
+    so = next(e for e in events if e["event"] == "section_opened")
+    data = so["data"]
+    assert data.get("page_lo") == 88, f"page_lo missing: {data}"
+    assert data.get("page_hi") == 104, f"page_hi missing: {data}"
+    assert data.get("idx") == 3, f"idx missing: {data}"
+
+
+def test_sse_relay_deep_read_pass_no_action_back_compat(client: TestClient) -> None:
+    """Old-shape ``deep_read_pass`` (no 'action' key — pre-Wave-3A backend)
+    must still be forwarded as ``deep_read_pass`` with its legacy fields
+    intact.  This protects the back-compat guarantee."""
+    payload = {
+        "pass": 1,
+        "note": "Scanned the introduction.",
+        "next_query": "methods",
+        "sections_read": [0],
+    }
+    events = _drive_chat_with_events(client, [("deep_read_pass", payload)])
+    event_types = [e["event"] for e in events]
+    assert "deep_read_pass" in event_types, (
+        f"deep_read_pass (legacy shape) missing from SSE stream; got {event_types}"
+    )
+    drp = next(e for e in events if e["event"] == "deep_read_pass")
+    data = drp["data"]
+    # Legacy keys must survive.
+    assert data.get("pass") == 1, f"pass missing: {data}"
+    assert data.get("note") == "Scanned the introduction.", f"note missing: {data}"
+    assert data.get("next_query") == "methods", f"next_query missing: {data}"
+    # No 'action' key — absence must not break the relay.
+    assert "action" not in data, f"unexpected action key in legacy payload: {data}"

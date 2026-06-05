@@ -3723,3 +3723,54 @@ body[data-view="taxonomy"] .tax-empty .tax-btn { pointer-events: auto; }
 .dr-notes { padding: 0.4rem 0.85rem 0.55rem; border-top: 1px solid var(--line); }
 .dr-note { color: var(--muted); font-size: 0.84rem; line-height: 1.5; margin: 0.18rem 0; }
 .dr-note::before { content: '\203a '; color: var(--accent-3); }
+
+/* Page chip — shown next to part label when page metadata is available. */
+.dr-part .dr-page {
+  font-size: 0.68rem;
+  color: var(--muted-2);
+  background: var(--bg-2, var(--bg-1));
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 0.32em;
+  flex: none;
+  margin-inline-start: 0.3rem;
+}
+.dr-part .dr-page:empty { display: none; }
+
+/* Opening highlight — briefly marks the part being entered. */
+.dr-part.dr-opening {
+  background: rgba(184, 168, 122, 0.08);
+  border-inline-start: 2px solid var(--accent);
+  padding-inline-start: calc(0.85rem - 2px);
+}
+.dr-part.dr-opening .dr-mark { color: var(--accent); }
+
+/* Action narrator — single-line, replace-in-place above the notes trail. */
+.dr-action {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  padding: 0.32rem 0.85rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.84rem;
+  color: var(--muted);
+  min-height: 0;
+}
+.dr-action-icon { flex: none; font-size: 0.9em; }
+.dr-action-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* RTL mirrors for Farsi documents. */
+.deepread:lang(fa) .dr-part.dr-opening {
+  border-inline-start: none;
+  border-inline-end: 2px solid var(--accent);
+  padding-inline-start: 0.85rem;
+  padding-inline-end: calc(0.85rem - 2px);
+}
+.deepread:lang(fa) .dr-part .dr-page {
+  margin-inline-start: 0;
+  margin-inline-end: 0.3rem;
+}

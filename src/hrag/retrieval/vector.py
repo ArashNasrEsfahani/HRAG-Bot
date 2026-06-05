@@ -11,6 +11,9 @@ doc_id       : str   — parent document
 source_type  : str   — "document" | "episodic"
 excluded     : int   — 0 = active, 1 = tombstoned (/forget)
 chunk_index  : int   — positional index inside the document
+page         : int   — 1-based source page (PDF only); -1 sentinel when None
+                       (Chroma rejects Python None; use -1 as the absent marker).
+                       Phase 13.1: enables where={"page":{"$gte":a,"$lte":b}} filtering.
 """
 
 from __future__ import annotations
@@ -91,6 +94,9 @@ class VectorStore:
                     "source_type": chunk.source_type,
                     "excluded": 0,
                     "chunk_index": chunk.chunk_index,
+                    # Phase 13.1: page as int; -1 sentinel when not available
+                    # (Chroma rejects Python None values in metadata dicts).
+                    "page": int(chunk.page) if chunk.page is not None else -1,
                 }
             )
             embs.append(emb)

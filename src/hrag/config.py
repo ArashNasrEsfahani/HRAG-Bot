@@ -467,6 +467,17 @@ class IngestConfig(BaseModel):
                                                          # targets 50-100 tokens;
                                                          # budget some slack.
 
+    # Phase 13.1 — per-chunk page numbers + clean chapter labels.
+    # When True (default), the PDF loader records per-page char spans and the
+    # chunker stamps each chunk with its 1-based start page (``chunks.page`` +
+    # Chroma metadata) and a normalized, forward-filled chapter label
+    # (``chunks.chapter``). No-op for non-PDF formats (page stays NULL). The
+    # agentic deep-read uses these to open a specific chapter/page deterministically
+    # and to cite "page 42, Chapter 7". Additive + cheap (offset math, no LLM);
+    # turning OFF reverts to pre-13.1 behaviour (columns NULL, Chroma page = -1).
+    # Requires a re-ingest to populate existing documents.
+    page_metadata_enabled: bool = True
+
 
 class ContextConfig(BaseModel):
     history_token_budget: int = 4000
@@ -671,11 +682,15 @@ class InteractionConfig(BaseModel):
 
 
 class DeepReadConfig(BaseModel):
-    """Phase 13 — agentic iterative "deep read" over a single document.
+    """Phase 13 / 13.1 — agentic multi-stage "deep read" over a single document.
 
-    On a broad/exploratory question the orchestrator reads a document
-    section-by-section across several passes (each pass plans the next from what
-    it just learned), visualised live in the GUI, then proposes follow-ups.
+    On a broad/exploratory OR structural question (or when a one-pass answer
+    would be weak), the orchestrator reads a document by choosing a navigation
+    action each pass — open a specific chapter deterministically (``read_part``),
+    search within the doc (``search``), or stop and answer (``answer``) — with the
+    full document map always in front of the planner. Visualised live in the GUI,
+    then proposes follow-ups. The planner is a small/weak local model, so the
+    action menu is closed and all counting / range-reads happen in code.
     """
 
     enabled: bool = True            # master switch
@@ -686,6 +701,20 @@ class DeepReadConfig(BaseModel):
     chunks_per_pass: int = 6        # chunks pulled per pass (scoped to the doc)
     min_rerank_score: float = -7.0  # stop when a pass surfaces nothing above this
     followups: int = 3              # follow-up suggestions offered at the end
+
+    # Phase 13.1 — smart escalation + agentic navigation.
+    structural_trigger: bool = True       # route structural/meta questions ("how many
+                                          # chapters", "table of contents", "structure of X")
+                                          # to the agentic read even when not "broad".
+    escalate_on_weak_answer: bool = True  # escalate a weak one-pass FACTUAL turn (no/low
+                                          # top_score or low rerank, results present) into the
+                                          # agentic read BEFORE generation (stream-only).
+    weak_answer_floor: float = 0.0        # rerank_score below this (with results present) = weak.
+    plan_max_tokens: int = 200            # cap on the per-pass action-planning LLM call.
+    structural_scan_all: bool = False     # for structural reads, deterministically open every
+                                          # part before synthesis (cheap, all SQL) for full coverage.
+    action_repeat_guard: bool = True      # redirect a read_part of an already-read part to the
+                                          # first unread part (kills same-part loops on weak models).
 
 
 class Config(BaseModel):

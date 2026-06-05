@@ -48,6 +48,79 @@ def is_broad_query(question: str) -> bool:
     return bool(_BROAD_RE.search(question))
 
 
+# Structural / meta questions about how a document is organised (chapter/section
+# counts, table of contents, overall structure). Short by nature, so — unlike
+# ``_BROAD_RE`` — there is deliberately NO ≥3-word guard.
+_STRUCTURAL_RE = re.compile(
+    r"(?:"
+    r"how many (?:chapters|sections|parts|pages|volumes)|"
+    r"number of (?:chapters|sections|pages|parts|volumes)|"
+    r"table of contents|contents page|\btoc\b|"
+    r"what (?:are|were) the (?:chapters|sections|parts)|"
+    r"list (?:the |all )?(?:chapters|sections|parts)|"
+    r"how (?:is|are) (?:it|the book|the document|the paper|the text|this) "
+    r"(?:organi[sz]ed|structured|divided|laid out)|"
+    r"(?:overall )?structure of (?:the|this) (?:book|document|paper|text)|"
+    r"how long is (?:the|this) (?:book|document)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Farsi structural cues (matched as plain substrings — no word boundaries in FA).
+_STRUCTURAL_FA = (
+    "چند فصل",
+    "چند بخش",
+    "چند صفحه",
+    "چند قسمت",
+    "فهرست مطالب",
+    "فهرست",
+    "ساختار کتاب",
+    "ساختار سند",
+    "تعداد فصل",
+    "تعداد صفحات",
+)
+
+
+def is_structural_query(q: str) -> bool:
+    """True for questions about a document's *organisation* (chapter/section/page
+    counts, table of contents, overall structure). Pure, bilingual EN + FA.
+
+    Tight by design: ``"how many people died"`` and ``"tell me about jung"`` are
+    both False.
+    """
+    return bool(q) and (
+        bool(_STRUCTURAL_RE.search(q)) or any(p in q for p in _STRUCTURAL_FA)
+    )
+
+
+# Phrasings that signal an answer failed to find the requested fact. Used by the
+# tests + a deferred re-read path; kept pure.
+_WEAK_ANSWER_RE = re.compile(
+    r"(?:"
+    r"could ?n[o']?t find|could not find|"
+    r"does ?n[o']?t specify|do(?:es)? ?n[o']?t specify|"
+    r"does ?n[o']?t mention|do(?:es)? ?n[o']?t mention|"
+    r"do ?n[o']?t have (?:enough )?information|"
+    r"no information|not specified|"
+    r"the passages (?:do not|do ?n[o']?t) (?:specify|mention|say)"
+    r")",
+    re.IGNORECASE,
+)
+
+_WEAK_ANSWER_FA = (
+    "نمی‌دانم",
+    "مشخص نشده",
+    "اطلاعاتی ندارم",
+)
+
+
+def is_weak_answer(text: str) -> bool:
+    """True when a generated answer signals failure-to-find. Pure."""
+    return bool(text) and (
+        bool(_WEAK_ANSWER_RE.search(text)) or any(p in text for p in _WEAK_ANSWER_FA)
+    )
+
+
 def pick_target_doc(results) -> Optional[tuple[str, str]]:
     """Pick the single most-relevant document from seed retrieval results.
 
@@ -164,3 +237,178 @@ class DeepReadState:
 
     def remaining(self) -> int:
         return sum(1 for p in self.parts if p.status != "read")
+
+
+@dataclass
+class PlannerAction:
+    """A single, hardened navigation action chosen by the planner LLM.
+
+    The planner picks one action per pass from a closed menu; ``parse_action``
+    coerces its raw JSON into one of these so a weak model can never loop or
+    crash the loop.
+    """
+
+    kind: str                        # "read_part" | "search" | "answer" | "read_page"
+    note: str = ""
+    part_idx: Optional[int] = None   # for read_part (resolved, in-range)
+    query: str = ""                  # for search
+    lo: Optional[int] = None         # chunk_index/page lower bound (read_part/read_page)
+    hi: Optional[int] = None         # chunk_index/page upper bound
+
+
+def _coerce_int(value) -> Optional[int]:
+    """Best-effort int coercion tolerating str/float/None. Never raises."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        try:
+            return int(float(value))
+        except (ValueError, TypeError):
+            return None
+
+
+def _first_unread_idx(state: DeepReadState) -> Optional[int]:
+    for p in state.parts:
+        if p.status != "read":
+            return p.idx
+    return None
+
+
+def parse_action(
+    data: dict,
+    state: DeepReadState,
+    *,
+    pages_available: bool = False,
+) -> PlannerAction:
+    """Harden a raw parsed-JSON planner dict into a safe, executable action.
+
+    Pure and defensive: the weak planner model must never be able to loop on an
+    already-read part or crash on malformed input. Unknown/empty actions fall
+    back to a (possibly empty) ``search``.
+    """
+    if not isinstance(data, dict):
+        data = {}
+    note = str(data.get("note", "")).strip()
+    action = str(data.get("action", "")).strip().lower()
+
+    if action == "answer":
+        return PlannerAction("answer", note=note)
+
+    if action == "read_part":
+        if not state.parts:
+            return PlannerAction("search", note=note, query="")
+        idx = _coerce_int(data.get("part_idx"))
+        if idx is None:
+            fallback = _first_unread_idx(state)
+            idx = fallback if fallback is not None else 0
+        # Clamp into range.
+        idx = max(0, min(idx, len(state.parts) - 1))
+        # Action-repeat guard: never re-read a part already marked read.
+        if state.parts[idx].status == "read":
+            nxt = _first_unread_idx(state)
+            if nxt is None:
+                return PlannerAction("answer", note=note)
+            idx = nxt
+        part = state.parts[idx]
+        return PlannerAction("read_part", note=note, part_idx=idx, lo=part.lo, hi=part.hi)
+
+    if action == "read_page":
+        if not pages_available:
+            return PlannerAction(
+                "search", note=note, query=str(data.get("query", "")).strip()
+            )
+        a = _coerce_int(data.get("from", data.get("lo")))
+        b = _coerce_int(data.get("to", data.get("hi")))
+        if a is None or b is None:
+            return PlannerAction(
+                "search", note=note, query=str(data.get("query", "")).strip()
+            )
+        return PlannerAction("read_page", note=note, lo=min(a, b), hi=max(a, b))
+
+    if action == "search":
+        return PlannerAction(
+            "search", note=note, query=str(data.get("query", "")).strip()
+        )
+
+    # Unknown / empty / missing action → safe default.
+    return PlannerAction("search", note=note, query="")
+
+
+def _row_field(row, key: str):
+    """Flexible accessor for sqlite3.Row / dict / object / tuple-like rows."""
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        pass
+    return getattr(row, key, None)
+
+
+def distinct_chapter_labels(rows: list) -> list[str]:
+    """Clean, dedupe (first-seen order) the ``section`` field of each row.
+
+    ``rows`` may be sqlite3.Row, dicts, or objects carrying a ``section`` field.
+    Junk headings (long/numeric/mojibake) are dropped via ``_clean_heading``.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        label = _clean_heading(_row_field(row, "section") or "")
+        if label and label not in seen:
+            seen.add(label)
+            out.append(label)
+    return out
+
+
+_TOC_CUE_RE = re.compile(r"table of contents|contents|فهرست مطالب|فهرست", re.IGNORECASE)
+_TOC_CHAPTER_RE = re.compile(r"chapter|فصل|بخش", re.IGNORECASE)
+_TOC_LINE_END_RE = re.compile(r"\d+$")
+
+
+def find_toc_chunk(rows: list) -> Optional[tuple[int, str]]:
+    """Find an early chunk that looks like a table of contents.
+
+    ``rows`` carry ``chunk_index:int`` and ``text:str`` (flexible accessor).
+    Only the earliest chunks are considered; the best-scoring one is returned as
+    ``(chunk_index, text)`` if it clears a small threshold, else ``None``.
+    Conservative by design — a false ``None`` is fine (the caller falls back to
+    ``distinct_chapter_labels``).
+    """
+    parsed: list[tuple[int, str]] = []
+    for row in rows:
+        ci = _row_field(row, "chunk_index")
+        txt = _row_field(row, "text")
+        if ci is None:
+            continue
+        try:
+            ci_int = int(ci)
+        except (ValueError, TypeError):
+            continue
+        parsed.append((ci_int, str(txt or "")))
+    if not parsed:
+        return None
+    parsed.sort(key=lambda r: r[0])
+    n_early = max(15, len(parsed) // 12)
+    early = parsed[:n_early]
+
+    best: Optional[tuple[int, str]] = None
+    best_score = 0.0
+    for ci, text in early:
+        low = text.lower()
+        score = 0.0
+        if _TOC_CUE_RE.search(low):
+            score += 3
+        score += min(5, len(_TOC_CHAPTER_RE.findall(low)))
+        toc_lines = 0
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if len(stripped) < 60 and _TOC_LINE_END_RE.search(stripped):
+                toc_lines += 1
+        score += min(5, toc_lines)
+        if score > best_score:
+            best_score = score
+            best = (ci, text)
+    if best is not None and best_score >= 4:
+        return best
+    return None

@@ -1,8 +1,8 @@
-"""Tests for hrag.ingest.metadata — detect_sections()."""
+"""Tests for hrag.ingest.metadata — detect_sections(), page_for_offset(), normalize_heading()."""
 
 from __future__ import annotations
 
-from hrag.ingest.metadata import detect_sections
+from hrag.ingest.metadata import detect_sections, normalize_heading, page_for_offset
 
 
 # ---------------------------------------------------------------------------
@@ -416,3 +416,117 @@ def test_legacy_and_regex_pick_earliest() -> None:
     assert off is not None
     # Should match the FIRST 'References' (plain title case), not the markdown one.
     assert text[off:].startswith("References\n")
+
+
+# ---------------------------------------------------------------------------
+# page_for_offset — Phase 13.1
+# ---------------------------------------------------------------------------
+
+def _spans() -> list[tuple[int, int, int]]:
+    """Build two synthetic page spans:
+      Page 1: chars [0, 10)
+      Page 2: chars [12, 22)   (gap [10,12) simulates the \\n\\n separator)
+    """
+    return [(0, 10, 1), (12, 22, 2)]
+
+
+def test_page_for_offset_inside_page1() -> None:
+    spans = _spans()
+    assert page_for_offset(5, spans) == 1
+
+
+def test_page_for_offset_inside_page2() -> None:
+    spans = _spans()
+    assert page_for_offset(15, spans) == 2
+
+
+def test_page_for_offset_in_separator_gap() -> None:
+    """Offset in the separator gap (between pages) should return the preceding page."""
+    spans = _spans()
+    # offset 11 is between end-of-page-1 (10) and start-of-page-2 (12)
+    assert page_for_offset(11, spans) == 1
+
+
+def test_page_for_offset_past_end_returns_last() -> None:
+    spans = _spans()
+    # offset 999 is beyond the last span
+    assert page_for_offset(999, spans) == 2
+
+
+def test_page_for_offset_empty_spans_returns_none() -> None:
+    assert page_for_offset(0, []) is None
+
+
+def test_page_for_offset_at_boundary() -> None:
+    """Offset exactly at end of a span is NOT in that span (half-open); falls
+    into the gap or the next span."""
+    spans = _spans()
+    # offset 10 == end of page 1 span → falls in the gap → returns page 1
+    assert page_for_offset(10, spans) == 1
+
+
+# ---------------------------------------------------------------------------
+# normalize_heading — Phase 13.1
+# ---------------------------------------------------------------------------
+
+def test_normalize_heading_strips_markdown_hashes() -> None:
+    assert normalize_heading("## Introduction") == "Introduction"
+
+
+def test_normalize_heading_strips_triple_hash() -> None:
+    assert normalize_heading("### Deep Section") == "Deep Section"
+
+
+def test_normalize_heading_strips_numbered_prefix_simple() -> None:
+    assert normalize_heading("1. Introduction") == "Introduction"
+
+
+def test_normalize_heading_strips_numbered_prefix_dotted() -> None:
+    assert normalize_heading("1.2 Methods") == "Methods"
+
+
+def test_normalize_heading_strips_roman_numeral_prefix() -> None:
+    result = normalize_heading("IV. Results")
+    assert result == "Results"
+
+
+def test_normalize_heading_strips_trailing_colon() -> None:
+    assert normalize_heading("Introduction:") == "Introduction"
+
+
+def test_normalize_heading_strips_trailing_punctuation() -> None:
+    assert normalize_heading("Summary.") == "Summary"
+
+
+def test_normalize_heading_collapses_internal_whitespace() -> None:
+    assert normalize_heading("Some  Heading  Here") == "Some Heading Here"
+
+
+def test_normalize_heading_rejects_mojibake() -> None:
+    assert normalize_heading("Introduct�on") == ""
+
+
+def test_normalize_heading_rejects_too_long() -> None:
+    long = "A" * 81
+    assert normalize_heading(long, max_len=80) == ""
+
+
+def test_normalize_heading_rejects_digit_only() -> None:
+    assert normalize_heading("12345") == ""
+
+
+def test_normalize_heading_rejects_no_alpha() -> None:
+    assert normalize_heading("--- ...") == ""
+
+
+def test_normalize_heading_accepts_clean_title() -> None:
+    assert normalize_heading("Liber Primus") == "Liber Primus"
+
+
+def test_normalize_heading_empty_string() -> None:
+    assert normalize_heading("") == ""
+
+
+def test_normalize_heading_just_hashes() -> None:
+    # After stripping hashes there's nothing left — no alpha → ""
+    assert normalize_heading("##") == ""

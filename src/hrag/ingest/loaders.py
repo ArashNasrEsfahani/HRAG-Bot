@@ -86,11 +86,23 @@ def _load_pdf_pymupdf(path: Path) -> tuple[str, dict[str, Any]]:
     # Join pages with a blank line so the paragraph splitter (which splits on
     # \n{2,}) treats page boundaries as paragraph boundaries. Without this,
     # the last paragraph of page N glues onto the first paragraph of page N+1.
-    full_text = "\n\n".join(pages)
+    # Compute page_spans (half-open char ranges into full_text) at join time —
+    # offsets are free here and required by the page-metadata ingest path.
+    SEP = "\n\n"
+    page_spans: list[tuple[int, int, int]] = []
+    cursor = 0
+    for text, pno in zip(pages, page_numbers):
+        start = cursor
+        cursor += len(text)
+        page_spans.append((start, cursor, pno))
+        cursor += len(SEP)
+    full_text = SEP.join(pages)
+
     metadata: dict[str, Any] = {
         "format": "pdf",
         "page_count": len(page_numbers),
         "pages": page_numbers,
+        "page_spans": page_spans,
     }
     return full_text, metadata
 

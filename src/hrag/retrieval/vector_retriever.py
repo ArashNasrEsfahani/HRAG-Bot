@@ -116,7 +116,7 @@ class VectorRetriever(Retriever):
                 chunk_id, doc_id, user_id,
                 text, title, section, subsection,
                 chunk_index, token_count, source_type,
-                excluded, metadata
+                excluded, metadata, page, chapter
             FROM chunks
             WHERE chunk_id IN ({placeholders})
         """
@@ -137,6 +137,29 @@ class VectorRetriever(Retriever):
                 except (json.JSONDecodeError, TypeError):
                     meta = {}
 
+            # Phase 13.1: rehydrate page + chapter defensively (old rows may
+            # lack these columns; row.keys() guard handles that gracefully).
+            row_keys = row.keys() if hasattr(row, "keys") else []
+            page_val: Optional[int] = None
+            if "page" in row_keys:
+                try:
+                    page_val = row["page"]  # may be None / NULL
+                except (IndexError, KeyError):
+                    pass
+
+            if "chapter" in row_keys:
+                try:
+                    chapter_val: str = row["chapter"] or ""
+                except (IndexError, KeyError):
+                    chapter_val = ""
+            else:
+                chapter_val = ""
+
+            # Merge chapter into metadata so consumers that inspect
+            # chunk.metadata["chapter"] still find it.
+            if chapter_val and "chapter" not in meta:
+                meta["chapter"] = chapter_val
+
             chunk = Chunk(
                 chunk_id=row["chunk_id"],
                 doc_id=row["doc_id"],
@@ -150,6 +173,7 @@ class VectorRetriever(Retriever):
                 chunk_index=row["chunk_index"],
                 token_count=row["token_count"],
                 source_type=row["source_type"],
+                page=page_val,
                 metadata=meta,
             )
             result[row["chunk_id"]] = chunk
